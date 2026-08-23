@@ -219,8 +219,8 @@ void CastPlay(struct sCastCtx* Ctx, struct metadata_s* MetaData) {
 	// lock on wait for a Cast response
 	pthread_mutex_lock(&Ctx->Mutex);
 	uint32_t now = gettime_ms();
-	if (!MetaData && Ctx->playDedupeMs && now - Ctx->lastPlayMs < Ctx->playDedupeMs) {
-		LOG_DEBUG("[%p]: coalescing PLAY", Ctx->owner);
+	if (Ctx->playDedupeMs && now - Ctx->lastPlayMs < Ctx->playDedupeMs) {
+		LOG_DEBUG("[%p]: coalescing duplicate PLAY", Ctx->owner);
 		pthread_mutex_unlock(&Ctx->Mutex);
 		return;
 	}

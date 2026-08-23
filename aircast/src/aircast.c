@@ -95,6 +95,7 @@ static uint16_t			glMetricsPort;
 static bool				glMetricsRunning;
 static int				glMetricsSock = -1;
 static pthread_t			glMetricsThread;
+static bool				glMusicAssistantProfile;
 
 static void ApplyMusicAssistantProfile(tMRConfig *config) {
 	config->SoftFlush = config->GroupOptimized = config->PersistentStream = config->RecoveryEnabled = true;
@@ -275,6 +276,7 @@ static void StartRecovery(struct sMR *device, uint32_t now, const char *reason) 
 	if (device->RetryCount++ >= device->Config.MaxRetries) {
 		device->CastSession = CAST_SESSION_FAILED;
 		LOG_ERROR("[%p]: CAST recovery failed generation=%u retries=%u", device, device->Generation, device->RetryCount);
+		raopsr_notify(device->Raop, RAOP_STOP, NULL);
 		return;
 	}
 	device->CastSession = CAST_SESSION_RECOVERING;
@@ -284,13 +286,16 @@ static void StartRecovery(struct sMR *device, uint32_t now, const char *reason) 
 		CastPlayRetry(device->CastCtx);
 	} else if (device->RetryCount == 2) {
 		LOG_WARN("[%p]: %s, reloading generation=%u", device, reason, device->Generation);
+		device->ExpectStop = true;
 		CastStop(device->CastCtx);
 		device->Generation++; device->Reloads++; device->TotalReloads++;
+		device->HttpGetAt = device->FirstReadAt = device->CastPlayingAt = 0;
 		LoadCurrentStream(device);
 	} else {
 		LOG_WARN("[%p]: %s, reconnecting receiver generation=%u", device, reason, device->Generation);
 		CastPowerOff(device->CastCtx);
 		device->Generation++; device->Reloads++; device->TotalReloads++;
+		device->HttpGetAt = device->FirstReadAt = device->CastPlayingAt = 0;
 		LoadCurrentStream(device);
 	}
 }
@@ -330,12 +335,13 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 			Device->ResumeStartedAt = Device->ResumeLatencyMs = 0;
 			Device->FirstRtpAt = Device->FirstSyncAt = Device->FirstAudioAt = Device->HttpGetAt = Device->FirstReadAt = Device->CastPlayingAt = 0;
 			Device->StreamUri[0] = '\0'; Device->CastSession = CAST_SESSION_IDLE;
+			Device->State = STOPPED; Device->ExpectStop = false; Device->SoftPausedAt = Device->LastRecoveryAt = 0;
 			LOG_INFO("[%p]: START generation=%u", Device, Device->Generation);
 			Device->RaopState = event;
 			break;
 		case RAOP_STOP:
 			LOG_INFO("[%p]: Stop", Device);
-			if (Device->RaopState == RAOP_PLAY) {
+			if (Device->CastSession != CAST_SESSION_IDLE && Device->CastSession != CAST_SESSION_STOPPING) {
 				CastStop(Device->CastCtx);
 				Device->ExpectStop = true;
 			}
@@ -359,7 +365,7 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 		case RAOP_PLAY: {
 			LOG_INFO("[%p]: RAOP first_audio +%ums", Device, gettime_ms() - Device->SessionStarted);
 			Device->FirstAudioAt = gettime_ms();
-			if (Device->CastSession == CAST_SESSION_SOFT_PAUSED) {
+			if (Device->CastSession == CAST_SESSION_SOFT_PAUSED && Device->Config.PersistentStream && *Device->StreamUri) {
 				Device->CastSession = CAST_SESSION_RESUMING;
 				Device->ResumeStartedAt = Device->FirstAudioAt;
 				Device->FirstReadAt = 0;
@@ -372,6 +378,7 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 				(void) !sscanf(Device->Config.Codec, "%31[^:]", codec);
 				snprintf(Device->StreamUri, sizeof(Device->StreamUri), "http://%s:%u/stream-%u.%s", inet_ntoa(glHost), port, count++, codec);
 				Device->CastSession = CAST_SESSION_STARTING;
+				Device->ExpectStop = false;
 				LoadCurrentStream(Device);
 				LOG_INFO("[%p]: CAST LOAD +%ums %s", Device, gettime_ms() - Device->SessionStarted, Device->StreamUri);
 			}
@@ -461,6 +468,8 @@ static void *MRThread(void *args) {
 					LOG_INFO("[%p]: Cast playing", p);
 					p->State = PLAYING;
 					p->CastSession = CAST_SESSION_PLAYING;
+					p->ExpectStop = false;
+					p->RetryCount = 0;
 					p->CastPlayingAt = now;
 					LOG_INFO("[%p]: CAST PLAYING +%ums startup=%ums generation=%u", p,
 						now - p->FirstAudioAt, now - p->SessionStarted, p->Generation);
@@ -485,7 +494,7 @@ static void *MRThread(void *args) {
 						p->ExpectStop = false;
 					}
 					p->State = STOPPED;
-					p->CastSession = CAST_SESSION_IDLE;
+					if (!p->ExpectStop) p->CastSession = CAST_SESSION_IDLE;
 				}
 			}
 
@@ -514,9 +523,14 @@ static void *MRThread(void *args) {
 			// Cast devices has closed the connection
 			if (type && !strcasecmp(type, "CLOSE")) {
 				LOG_INFO("[%p]: Cast peer closed connection", p);
-				if (p->State != STOPPED) raopsr_notify(p->Raop, RAOP_STOP, NULL);
 				p->State = STOPPED;
-				p->CastSession = CAST_SESSION_IDLE;
+				if (p->Config.RecoveryEnabled && (p->RaopState == RAOP_PLAY || p->CastSession == CAST_SESSION_STARTING ||
+					p->CastSession == CAST_SESSION_RESUMING || p->CastSession == CAST_SESSION_RECOVERING)) {
+					StartRecovery(p, now, "Cast peer closed");
+				} else {
+					if (p->RaopState == RAOP_PLAY) raopsr_notify(p->Raop, RAOP_STOP, NULL);
+					p->CastSession = CAST_SESSION_IDLE;
+				}
 			}
 
 			json_decref(data);
@@ -538,6 +552,7 @@ static void *MRThread(void *args) {
 				}
 				if (stats.last_read_ms && !p->FirstReadAt) {
 					p->FirstReadAt = stats.last_read_ms;
+					p->RetryCount = 0;
 					LOG_INFO("[%p]: FIRST_READ +%ums%s fill=%u", p, p->FirstReadAt - p->SessionStarted,
 						p->CastSession == CAST_SESSION_RESUMING ? " (resume)" : "", stats.fill);
 				}
@@ -1113,7 +1128,10 @@ static bool ParseArgs(int argc, char **argv) {
 			return false;
 		case '-':
 			if (!strcmp(opt + 1, "noflush")) glMRConfig.Flush = false;
-			else if (!strcmp(opt + 1, "profile") && !strcmp(optarg, "music-assistant")) ApplyMusicAssistantProfile(&glMRConfig);
+			else if (!strcmp(opt + 1, "profile") && !strcmp(optarg, "music-assistant") && !glMusicAssistantProfile) {
+				ApplyMusicAssistantProfile(&glMRConfig);
+				glMusicAssistantProfile = true;
+			}
 			else if (!strcmp(opt + 1, "metrics-port")) glMetricsPort = strtoul(optarg, NULL, 10);
 			else { printf("%s", usage); return false; }
 			break;
@@ -1146,8 +1164,12 @@ int main(int argc, char *argv[]) {
 
 	netsock_init();
 
-	// first try to find a config file on the command line
+	// Apply profile defaults before config.xml so global and per-device values can tune the preset.
 	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--profile") && i + 1 < argc && !strcmp(argv[i + 1], "music-assistant")) {
+			ApplyMusicAssistantProfile(&glMRConfig);
+			glMusicAssistantProfile = true;
+		}
 		if (!strcmp(argv[i], "-x")) {
 			strcpy(glConfigName, argv[i+1]);
 		}

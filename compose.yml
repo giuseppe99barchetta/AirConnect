@@ -4,4 +4,12 @@ services:
     container_name: airconnect
     network_mode: host
     restart: unless-stopped
-    command: ["-Z", "--profile", "music-assistant", "--metrics-port", "9876", "-d", "all=info"]
+    stop_grace_period: 20s
+    volumes:
+      - ./config.music-assistant.xml:/config.xml:ro
+    command: ["-Z", "-x", "/config.xml", "--profile", "music-assistant", "--metrics-port", "9876", "-d", "all=info"]
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"

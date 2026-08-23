@@ -5,6 +5,7 @@ typedef enum { START, FLUSH, PLAY, STOP, STALL, CLOSE, TEARDOWN } event_t;
 
 static state_t next(state_t state, event_t event, int retries, int max_retries) {
 	if (event == TEARDOWN || event == STOP) return STOPPING;
+	if (event == CLOSE && (state == STARTING || state == PLAYING || state == RESUMING || state == RECOVERING)) return RECOVERING;
 	if (event == CLOSE) return IDLE;
 	if (event == START) return STARTING;
 	if (event == FLUSH && state == PLAYING) return SOFT_PAUSED;
@@ -22,10 +23,11 @@ int main(void) {
 	assert(next(SOFT_PAUSED, PLAY, 0, 3) == RESUMING);
 	assert(next(RESUMING, PLAY, 0, 3) == PLAYING);
 	assert(next(PLAYING, FLUSH, 0, 3) == SOFT_PAUSED);           /* repeated flush */
+	assert(next(SOFT_PAUSED, STOP, 0, 3) == STOPPING);           /* teardown after pause */
 	assert(next(PLAYING, STALL, 0, 3) == RECOVERING);            /* HTTP stall */
 	assert(next(RECOVERING, STALL, 3, 3) == FAILED);             /* retry bound */
-	assert(next(STARTING, CLOSE, 0, 3) == IDLE);                 /* close startup */
-	assert(next(PLAYING, CLOSE, 0, 3) == IDLE);                  /* close playback */
+	assert(next(STARTING, CLOSE, 0, 3) == RECOVERING);           /* close startup */
+	assert(next(PLAYING, CLOSE, 0, 3) == RECOVERING);            /* close playback */
 	assert(next(RECOVERING, TEARDOWN, 0, 3) == STOPPING);        /* teardown recovery */
 	return 0;
 }
