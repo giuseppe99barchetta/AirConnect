@@ -11,6 +11,6 @@ services:
       - --metrics-port
       - "9876"
       - -l
-      - "0:600"
+      - "0:500"
       - -d
       - all=info
