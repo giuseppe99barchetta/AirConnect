@@ -79,6 +79,7 @@ void SaveConfig(char *name, void *ref, bool full) {
 	XMLUpdateNode(doc, common, false, "persistent_stream", "%d", glMRConfig.PersistentStream);
 	XMLUpdateNode(doc, common, false, "play_dedupe_ms", "%u", glMRConfig.PlayDedupeMs);
 	XMLUpdateNode(doc, common, false, "recovery_enabled", "%d", glMRConfig.RecoveryEnabled);
+	XMLUpdateNode(doc, common, false, "group_startup_grace_ms", "%u", glMRConfig.GroupStartupGraceMs);
 
 	for (int i = 0; i < glMaxDevices; i++) {
 		IXML_Node *dev_node;
@@ -146,6 +147,7 @@ static void LoadConfigItem(tMRConfig *Conf, char *name, char *val) {
 	if (!strcmp(name, "persistent_stream")) Conf->PersistentStream = atoi(val);
 	if (!strcmp(name, "play_dedupe_ms")) Conf->PlayDedupeMs = strtoul(val, NULL, 10);
 	if (!strcmp(name, "recovery_enabled")) Conf->RecoveryEnabled = atoi(val);
+	if (!strcmp(name, "group_startup_grace_ms")) Conf->GroupStartupGraceMs = strtoul(val, NULL, 10);
 	if (!strcmp(name, "name")) strcpy(Conf->Name, val);
 	if (!strcmp(name, "mac"))  {
 		unsigned mac[6];

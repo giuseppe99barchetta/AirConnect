@@ -33,6 +33,12 @@ session is starting or playing, recovery is bounded: forced `PLAY`, then
 profile only changes these timeouts and prefers the first two stages; it does
 not change the default upstream path.
 
+The soft-flush timeout starts only after a `RAOP_PLAY` resume request; a long
+pause retains the session.  Cast events are tagged with the active generation
+before they enter the device event queue, and older generations are discarded.
+`--metrics-port` exports the per-device recovery and latency counters on
+`/metrics`.
+
 ## Risks and boundaries
 
 The RAOP HTTP listener is created for every real RTSP session, so a URL cannot

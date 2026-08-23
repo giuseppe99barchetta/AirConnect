@@ -91,11 +91,16 @@ static struct mdnsd*		glmDNSServer = NULL;
 static pthread_mutex_t		glMainMutex;
 static uint32_t				glNetmask;
 static char*				glNameFormat = "%s+";
+static uint16_t			glMetricsPort;
+static bool				glMetricsRunning;
+static int				glMetricsSock = -1;
+static pthread_t			glMetricsThread;
 
 static void ApplyMusicAssistantProfile(tMRConfig *config) {
 	config->SoftFlush = config->GroupOptimized = config->PersistentStream = config->RecoveryEnabled = true;
 	config->SoftFlushTimeoutMs = 1500; config->ReaderStallMs = 1200; config->PlayRetryMs = 700;
 	config->MaxRetries = 3; config->PrebufferMs = 150; config->PlayDedupeMs = 250;
+	config->GroupStartupGraceMs = 1500;
 }
 
 static char usage[] =
@@ -123,6 +128,7 @@ static char usage[] =
 		   "  -t                    license terms\n"
 		   "  --noflush             ignore flush command (wait for teardown to stop)\n"
 		   "  --profile music-assistant  enable Cast Group recovery profile\n"
+		   "  --metrics-port <port>  expose Prometheus metrics on /metrics\n"
 		   "\n"
 		   "Build options:"
 #if LINUX
@@ -171,6 +177,83 @@ static void  RemoveCastDevice(struct sMR *Device);
 static bool	 Start(bool cold);
 static bool	 Stop(bool exit);
 
+static void *MetricsThread(void *args) {
+	(void) args;
+	while (glMetricsRunning) {
+		fd_set fds;
+		struct timeval timeout = { 0, 250 * 1000 };
+		FD_ZERO(&fds); FD_SET(glMetricsSock, &fds);
+		if (select(glMetricsSock + 1, &fds, NULL, NULL, &timeout) <= 0 || !FD_ISSET(glMetricsSock, &fds)) continue;
+		int sock = accept(glMetricsSock, NULL, NULL);
+		if (sock < 0) continue;
+		char request[256] = "", body[65536];
+		struct timeval clientTimeout = { 1, 0 };
+		FD_ZERO(&fds); FD_SET(sock, &fds);
+		if (select(sock + 1, &fds, NULL, NULL, &clientTimeout) <= 0) {
+			closesocket(sock);
+			continue;
+		}
+		recv(sock, request, sizeof(request) - 1, 0);
+		if (strncmp(request, "GET /metrics ", 13)) {
+			send(sock, "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n", 45, 0);
+			closesocket(sock);
+			continue;
+		}
+		size_t used = 0;
+		for (int i = 0; i < glMaxDevices && used < sizeof(body); i++) {
+			struct sMR *p = &glMRDevices[i];
+			pthread_mutex_lock(&p->Mutex);
+			if (p->Running) {
+				raopsr_stats_t stats = { 0 };
+				raopsr_get_stats(p->Raop, &stats);
+				int written = snprintf(body + used, sizeof(body) - used,
+				"airconnect_cast_startup_latency_ms{device=\"%s\"} %u\n"
+				"airconnect_cast_resume_latency_ms{device=\"%s\"} %u\n"
+				"airconnect_cast_reader_stalls_total{device=\"%s\"} %u\n"
+				"airconnect_cast_retries_total{device=\"%s\"} %u\n"
+				"airconnect_cast_reloads_total{device=\"%s\"} %u\n"
+				"airconnect_buffer_fill_frames{device=\"%s\"} %u\n"
+				"airconnect_session_state{device=\"%s\"} %u\n",
+				p->Config.Name, p->CastPlayingAt ? p->CastPlayingAt - p->SessionStarted : 0,
+				p->Config.Name, p->ResumeLatencyMs, p->Config.Name, p->TotalReaderStalls,
+				p->Config.Name, p->TotalRetries, p->Config.Name, p->TotalReloads, p->Config.Name, stats.fill,
+				p->Config.Name, (unsigned) p->CastSession);
+				used += written < 0 ? 0 : min((size_t) written, sizeof(body) - used - 1);
+			}
+			pthread_mutex_unlock(&p->Mutex);
+		}
+		char header[128];
+		int headerLen = snprintf(header, sizeof(header), "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\n\r\n", used);
+		send(sock, header, headerLen, 0);
+		send(sock, body, used, 0);
+		closesocket(sock);
+	}
+	return NULL;
+}
+
+static bool StartMetrics(void) {
+	if (!glMetricsPort || glMetricsRunning) return true;
+	glMetricsSock = bind_socket(glHost, &glMetricsPort, SOCK_STREAM);
+	if (glMetricsSock < 0) return false;
+	if (listen(glMetricsSock, 4)) {
+		closesocket(glMetricsSock);
+		glMetricsSock = -1;
+		return false;
+	}
+	glMetricsRunning = true;
+	pthread_create(&glMetricsThread, NULL, &MetricsThread, NULL);
+	LOG_INFO("Metrics listening on port %hu", glMetricsPort);
+	return true;
+}
+
+static void StopMetrics(void) {
+	if (!glMetricsRunning) return;
+	glMetricsRunning = false;
+	shutdown_socket(glMetricsSock);
+	pthread_join(glMetricsThread, NULL);
+	glMetricsSock = -1;
+}
+
 static void LoadCurrentStream(struct sMR *device) {
 	metadata_t metadata = { .title = "Streaming from AirConnect", .duration = 0, .track = 0 };
 	char *contentType = "audio/flac";
@@ -178,33 +261,36 @@ static void LoadCurrentStream(struct sMR *device) {
 	if (strcasestr(device->Config.Codec, "mp3")) contentType = "audio/mpeg";
 	else if (strcasestr(device->Config.Codec, "aac")) contentType = "audio/aac";
 	else if (strcasestr(device->Config.Codec, "wav")) contentType = "audio/wav";
+	CastSetGeneration(device->CastCtx, device->Generation);
 	CastLoad(device->CastCtx, device->StreamUri, contentType, device->Name, &metadata, 0);
 	CastPlayRetry(device->CastCtx);
 }
 
-static void StartRecovery(struct sMR *device, uint32_t now) {
+static void StartRecovery(struct sMR *device, uint32_t now, const char *reason) {
 	if (!device->Config.RecoveryEnabled || !*device->StreamUri ||
 		now - device->LastRecoveryAt < device->Config.PlayRetryMs) return;
 	device->LastRecoveryAt = now;
 	device->ReaderStalls++;
+	device->TotalReaderStalls++;
 	if (device->RetryCount++ >= device->Config.MaxRetries) {
 		device->CastSession = CAST_SESSION_FAILED;
 		LOG_ERROR("[%p]: CAST recovery failed generation=%u retries=%u", device, device->Generation, device->RetryCount);
 		return;
 	}
 	device->CastSession = CAST_SESSION_RECOVERING;
+	device->TotalRetries++;
 	if (device->RetryCount == 1) {
-		LOG_WARN("[%p]: reader stall, retrying PLAY generation=%u", device, device->Generation);
+		LOG_WARN("[%p]: %s, retrying PLAY generation=%u", device, reason, device->Generation);
 		CastPlayRetry(device->CastCtx);
 	} else if (device->RetryCount == 2) {
-		LOG_WARN("[%p]: reader stall, reloading generation=%u", device, device->Generation);
+		LOG_WARN("[%p]: %s, reloading generation=%u", device, reason, device->Generation);
 		CastStop(device->CastCtx);
-		device->Generation++; device->Reloads++;
+		device->Generation++; device->Reloads++; device->TotalReloads++;
 		LoadCurrentStream(device);
 	} else {
-		LOG_WARN("[%p]: reader stall, reconnecting receiver generation=%u", device, device->Generation);
+		LOG_WARN("[%p]: %s, reconnecting receiver generation=%u", device, reason, device->Generation);
 		CastPowerOff(device->CastCtx);
-		device->Generation++; device->Reloads++;
+		device->Generation++; device->Reloads++; device->TotalReloads++;
 		LoadCurrentStream(device);
 	}
 }
@@ -239,8 +325,9 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 	switch (event) {
 		case RAOP_STREAM:
 			// a PLAY will come later, so we'll do the load at that time
-			Device->Generation++; Device->RetryCount = Device->ReaderStalls = Device->Reloads = 0;
+			Device->Generation++; Device->RetryCount = 0;
 			Device->SessionStarted = gettime_ms();
+			Device->ResumeStartedAt = Device->ResumeLatencyMs = 0;
 			Device->FirstRtpAt = Device->FirstSyncAt = Device->FirstAudioAt = Device->HttpGetAt = Device->FirstReadAt = Device->CastPlayingAt = 0;
 			Device->StreamUri[0] = '\0'; Device->CastSession = CAST_SESSION_IDLE;
 			LOG_INFO("[%p]: START generation=%u", Device, Device->Generation);
@@ -274,6 +361,8 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 			Device->FirstAudioAt = gettime_ms();
 			if (Device->CastSession == CAST_SESSION_SOFT_PAUSED) {
 				Device->CastSession = CAST_SESSION_RESUMING;
+				Device->ResumeStartedAt = Device->FirstAudioAt;
+				Device->FirstReadAt = 0;
 				LOG_INFO("[%p]: RESUME after %ums generation=%u", Device, Device->FirstAudioAt - Device->SoftPausedAt, Device->Generation);
 				CastPlayRetry(Device->CastCtx);
 			} else if (Device->RaopState != RAOP_PLAY) {
@@ -350,6 +439,15 @@ static void *MRThread(void *args) {
 
 		// a message has been received
 		if (data) {
+			json_t *generation = json_object_get(data, "_airconnect_generation");
+			if (p->Config.RecoveryEnabled && json_is_integer(generation) &&
+				(uint32_t) json_integer_value(generation) != p->Generation) {
+				LOG_INFO("[%p]: ignoring stale Cast event generation=%u current=%u", p,
+					(unsigned) json_integer_value(generation), p->Generation);
+				json_decref(data);
+				data = NULL;
+			}
+			if (data) {
 			json_t *val = json_object_get(data, "type");
 			const char *type = json_string_value(val);
 			uint32_t now = gettime_ms();
@@ -359,12 +457,17 @@ static void *MRThread(void *args) {
 				const char *state = GetMediaItem_S(data, 0, "playerState");
 
 				if (state && !strcasecmp(state, "PLAYING") && p->State != PLAYING) {
+					bool resumed = p->CastSession == CAST_SESSION_RESUMING;
 					LOG_INFO("[%p]: Cast playing", p);
 					p->State = PLAYING;
 					p->CastSession = CAST_SESSION_PLAYING;
 					p->CastPlayingAt = now;
 					LOG_INFO("[%p]: CAST PLAYING +%ums startup=%ums generation=%u", p,
 						now - p->FirstAudioAt, now - p->SessionStarted, p->Generation);
+					if (resumed) {
+						p->ResumeLatencyMs = now - p->ResumeStartedAt;
+						LOG_INFO("[%p]: RESUME_LATENCY=%ums generation=%u", p, p->ResumeLatencyMs, p->Generation);
+					}
 					if (p->RaopState != RAOP_PLAY) raopsr_notify(p->Raop, RAOP_PLAY, NULL);
 				}
 
@@ -382,6 +485,7 @@ static void *MRThread(void *args) {
 						p->ExpectStop = false;
 					}
 					p->State = STOPPED;
+					p->CastSession = CAST_SESSION_IDLE;
 				}
 			}
 
@@ -416,6 +520,7 @@ static void *MRThread(void *args) {
 			}
 
 			json_decref(data);
+			}
 		}
 
 		if (p->Config.RecoveryEnabled && p->CastSession != CAST_SESSION_FAILED &&
@@ -433,22 +538,20 @@ static void *MRThread(void *args) {
 				}
 				if (stats.last_read_ms && !p->FirstReadAt) {
 					p->FirstReadAt = stats.last_read_ms;
-					LOG_INFO("[%p]: FIRST_READ +%ums fill=%u", p, p->FirstReadAt - p->SessionStarted, stats.fill);
+					LOG_INFO("[%p]: FIRST_READ +%ums%s fill=%u", p, p->FirstReadAt - p->SessionStarted,
+						p->CastSession == CAST_SESSION_RESUMING ? " (resume)" : "", stats.fill);
 				}
-				if (stats.last_write_ms && now - stats.last_write_ms < p->Config.ReaderStallMs &&
-					(!stats.last_read_ms || now - stats.last_read_ms >= p->Config.ReaderStallMs)) {
-					LOG_WARN("[%p]: reader stalled W:%u R:%u fill:%u http:%u", p, stats.written, stats.read, stats.fill, stats.http_connected);
-					StartRecovery(p, now);
+				uint32_t grace = p->Group && p->Config.GroupOptimized ? p->Config.GroupStartupGraceMs : 0;
+				bool waiting = now - p->FirstAudioAt < grace;
+				bool noGet = !stats.http_connected && now - p->FirstAudioAt >= p->Config.ReaderStallMs;
+				bool noRead = stats.last_write_ms && now - stats.last_write_ms < p->Config.ReaderStallMs &&
+					(!stats.last_read_ms || now - stats.last_read_ms >= p->Config.ReaderStallMs);
+				bool resumeTimeout = p->CastSession == CAST_SESSION_RESUMING && p->Config.SoftFlushTimeoutMs &&
+					now - p->ResumeStartedAt >= p->Config.SoftFlushTimeoutMs;
+				if (!waiting && (noGet || noRead) && (p->CastSession != CAST_SESSION_RESUMING || resumeTimeout)) {
+					StartRecovery(p, now, resumeTimeout ? "soft resume timed out" : (noGet ? "HTTP GET missing" : "HTTP reader stalled"));
 				}
 			}
-		}
-
-		if (p->CastSession == CAST_SESSION_SOFT_PAUSED && p->Config.SoftFlushTimeoutMs &&
-			gettime_ms() - p->SoftPausedAt >= p->Config.SoftFlushTimeoutMs) {
-			LOG_INFO("[%p]: soft pause expired; next PLAY will reload", p);
-			CastStop(p->CastCtx);
-			p->ExpectStop = true;
-			p->CastSession = CAST_SESSION_STOPPING;
 		}
 
 		// get track position & CurrentURI
@@ -742,9 +845,11 @@ static bool AddCastDevice(struct sMR *Device, char *Name, char *UDN, bool group,
 	Device->Group 		= group;
 	Device->Remove		= false;
 	Device->CastSession = CAST_SESSION_IDLE;
-	Device->Generation = Device->SessionStarted = Device->SoftPausedAt = Device->LastRecoveryAt = 0;
+	Device->Generation = Device->SessionStarted = Device->SoftPausedAt = Device->ResumeStartedAt = Device->LastRecoveryAt = 0;
 	Device->RetryCount = Device->ReaderStalls = Device->Reloads = 0;
+	Device->TotalRetries = Device->TotalReaderStalls = Device->TotalReloads = 0;
 	Device->FirstRtpAt = Device->FirstSyncAt = Device->FirstAudioAt = Device->HttpGetAt = Device->FirstReadAt = Device->CastPlayingAt = 0;
+	Device->ResumeLatencyMs = 0;
 	Device->StreamUri[0] = '\0';
 	Device->VolumeStampRx = Device->VolumeStampTx = gettime_ms() - 2000;
 
@@ -850,6 +955,7 @@ static bool Start(bool cold) {
 	// start the mDNS devices discovery thread
 	glmDNSsearchHandle = mdnssd_init(false, glHost, true);
 	pthread_create(&glmDNSsearchThread, NULL, &mDNSsearchThread, NULL);
+	if (!StartMetrics()) LOG_ERROR("Cannot start metrics server", NULL);
 
 	return true;
 }
@@ -857,6 +963,7 @@ static bool Start(bool cold) {
 /*---------------------------------------------------------------------------*/
 static bool Stop(bool exit) {
 	glMainRunning = false;
+	StopMetrics();
 
 	if (glHost.s_addr != INADDR_ANY) {
 		LOG_DEBUG("terminate search thread ...", NULL);
@@ -918,7 +1025,7 @@ static bool ParseArgs(int argc, char **argv) {
 
 	while (optind < argc && strlen(argv[optind]) >= 2 && argv[optind][0] == '-') {
 		char *opt = argv[optind] + 1;
-		if (!strcmp(opt, "-profile") && optind < argc - 1) {
+		if ((!strcmp(opt, "-profile") || !strcmp(opt, "-metrics-port")) && optind < argc - 1) {
 			optarg = argv[optind + 1];
 			optind += 2;
 		} else if (strstr("abxdpiflcvN", opt) && optind < argc - 1) {
@@ -1007,6 +1114,7 @@ static bool ParseArgs(int argc, char **argv) {
 		case '-':
 			if (!strcmp(opt + 1, "noflush")) glMRConfig.Flush = false;
 			else if (!strcmp(opt + 1, "profile") && !strcmp(optarg, "music-assistant")) ApplyMusicAssistantProfile(&glMRConfig);
+			else if (!strcmp(opt + 1, "metrics-port")) glMetricsPort = strtoul(optarg, NULL, 10);
 			else { printf("%s", usage); return false; }
 			break;
 		default:

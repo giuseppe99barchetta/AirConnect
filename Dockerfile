@@ -3,6 +3,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 WORKDIR /src
 COPY . .
 RUN make -C aircast/tests
+RUN make -C common/libraop CC=gcc HOST=linux PLATFORM=x86_64 lib \
+ && cp common/libraop/lib/linux/x86_64/libraop.a common/libraop/targets/linux/x86_64/libraop.a \
+ && cp common/libraop/src/raop_server.h common/libraop/targets/include/raop_server.h
 RUN make -C aircast CC=gcc HOST=linux PLATFORM=x86_64 -j2
 
 FROM debian:bookworm-slim

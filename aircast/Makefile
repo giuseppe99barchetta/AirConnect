@@ -74,9 +74,15 @@ LIBRARY		= $(RAOP)/$(HOST)/$(PLATFORM)/libraop.a \
 				  
 LIBRARY_STATIC 	= $(LIBRARY) $(OPENSSL)/libopenssl.a
 
-all: directory $(EXECUTABLE) $(EXECUTABLE_STATIC)
+all: directory raop-library $(EXECUTABLE) $(EXECUTABLE_STATIC)
 
-$(EXECUTABLE): $(OBJECTS)
+.PHONY: raop-library
+raop-library:
+	$(MAKE) -C $(COMMON)/libraop CC=$(CC) HOST=$(HOST) PLATFORM=$(PLATFORM) lib
+	cp $(COMMON)/libraop/lib/$(HOST)/$(PLATFORM)/libraop.a $(RAOP)/$(HOST)/$(PLATFORM)/libraop.a
+	cp $(COMMON)/libraop/src/raop_server.h $(RAOP)/include/raop_server.h
+
+$(EXECUTABLE): raop-library $(OBJECTS)
 	echo $(PLATFORM)
 	$(CC) $(OBJECTS) $(LIBRARY) $(CFLAGS) $(LDFLAGS) -o $@
 ifeq ($(HOST),macos)
@@ -84,7 +90,7 @@ ifeq ($(HOST),macos)
 	lipo -create -output $(CORE) $$(ls $(CORE)* | grep -v '\-static')
 endif
 
-$(EXECUTABLE_STATIC): $(OBJECTS_STATIC)
+$(EXECUTABLE_STATIC): raop-library $(OBJECTS_STATIC)
 	$(CC) $(OBJECTS_STATIC) $(LIBRARY_STATIC) $(CFLAGS) $(LDFLAGS) $(LINKSTATIC) -o $@
 ifeq ($(HOST),macos)
 	rm -f $(CORE)-static

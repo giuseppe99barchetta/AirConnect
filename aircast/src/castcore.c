@@ -268,7 +268,7 @@ void CastDisconnect(struct sCastCtx *Ctx) {
 	}
 
 	Ctx->reqId = 1;
-	Ctx->waitId = Ctx->waitMedia = Ctx->mediaSessionId = 0;
+	Ctx->waitId = Ctx->waitMedia = Ctx->mediaSessionId = Ctx->waitGeneration = Ctx->mediaGeneration = 0;
 	Ctx->Status = CAST_DISCONNECTED;
 	NFREE(Ctx->sessionId);
 	NFREE(Ctx->transportId);
@@ -315,7 +315,7 @@ void *CreateCastDevice(void *owner, bool group, bool stopReceiver, struct in_add
 	Ctx->mediaVolume  = MediaVolume;
 	Ctx->group 		= group;
 	Ctx->stopReceiver = stopReceiver;
-	Ctx->playDedupeMs = Ctx->lastPlayMs = 0;
+	Ctx->playDedupeMs = Ctx->lastPlayMs = Ctx->generation = Ctx->waitGeneration = Ctx->mediaGeneration = 0;
 	Ctx->ssl  		= SSL_new(glSSLctx);
 
 	queue_init(&Ctx->eventQueue, false, NULL);
@@ -479,6 +479,7 @@ static void ProcessQueue(tCastCtx *Ctx) {
 
 		Ctx->waitId = Ctx->reqId++;
 		Ctx->waitMedia = Ctx->waitId;
+		Ctx->waitGeneration = Ctx->generation;
 		Ctx->mediaSessionId = 0;
 
 		LOG_INFO("[%p]: Processing LOAD (id:%u)", Ctx->owner, Ctx->waitId);
@@ -568,6 +569,7 @@ static void *CastSocketThread(void *args) {
 
 	while (Ctx->running) {
 		int requestId = 0;
+		uint32_t eventGeneration = 0;
 		bool forward = true;
 		const char *str = NULL;
 
@@ -595,6 +597,12 @@ static void *CastSocketThread(void *args) {
 		if (json_is_string(val)) {
 			pthread_mutex_lock(&Ctx->Mutex);
 			str = json_string_value(val);
+			eventGeneration = Ctx->generation;
+			if (!strcasecmp(str, "MEDIA_STATUS")) {
+				int mediaId = GetMediaItem_I(root, 0, "mediaSessionId");
+				if (requestId && requestId == Ctx->waitMedia) eventGeneration = Ctx->waitGeneration;
+				else if (mediaId) eventGeneration = mediaId == Ctx->mediaSessionId ? Ctx->mediaGeneration : 0;
+			}
 
 			if (!strcasecmp(str, "MEDIA_STATUS")) {
 				LOG_DEBUG("[%p]: type:%s (id:%d) %s", Ctx->owner, str, requestId, GetMediaItem_S(root, 0, "playerState"));
@@ -670,6 +678,7 @@ static void *CastSocketThread(void *args) {
 					if (id) {
 						Ctx->waitMedia = 0;
 						Ctx->mediaSessionId = id;
+						Ctx->mediaGeneration = eventGeneration;
 						LOG_INFO("[%p]: Media session id %d", Ctx->owner, Ctx->mediaSessionId);
 						// set media volume when session is re-connected
 						SetMediaVolume(Ctx, Ctx->mediaVolume);
@@ -686,6 +695,7 @@ static void *CastSocketThread(void *args) {
 				if (!Ctx->waitId && Ctx->Status == CAST_LAUNCHED) ProcessQueue(Ctx);
 			}
 
+			if (forward) json_object_set_new(root, "_airconnect_generation", json_integer(eventGeneration));
 			pthread_mutex_unlock(&Ctx->Mutex);
 		}
 

@@ -18,6 +18,7 @@ int main(void) {
 	assert(next(IDLE, START, 0, 3) == STARTING);                 /* normal start */
 	assert(next(STARTING, PLAY, 0, 3) == PLAYING);
 	assert(next(PLAYING, FLUSH, 0, 3) == SOFT_PAUSED);           /* pause/resume */
+	assert(next(SOFT_PAUSED, FLUSH, 0, 3) == SOFT_PAUSED);       /* long pause stays reusable */
 	assert(next(SOFT_PAUSED, PLAY, 0, 3) == RESUMING);
 	assert(next(RESUMING, PLAY, 0, 3) == PLAYING);
 	assert(next(PLAYING, FLUSH, 0, 3) == SOFT_PAUSED);           /* repeated flush */

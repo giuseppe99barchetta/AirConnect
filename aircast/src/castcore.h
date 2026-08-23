@@ -54,6 +54,7 @@ typedef struct sCastCtx {
 	bool			group;
 	bool			stopReceiver;
 	uint32_t	playDedupeMs, lastPlayMs;
+	uint32_t	generation, waitGeneration, mediaGeneration;
 } tCastCtx;
 
 typedef struct {

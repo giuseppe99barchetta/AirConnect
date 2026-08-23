@@ -151,6 +151,7 @@ bool CastLoad(struct sCastCtx *Ctx, char *URI, char *ContentType, const char *Na
 
 		Ctx->waitId = Ctx->reqId++;
 		Ctx->waitMedia = Ctx->waitId;
+		Ctx->waitGeneration = Ctx->generation;
 		Ctx->mediaSessionId = 0;
 
 		msg = json_pack("{ss,si,ss,sf,sb,so}", "type", "LOAD",
@@ -282,6 +283,12 @@ void CastPlayRetry(struct sCastCtx* Ctx) {
 void CastSetPlayDedupe(struct sCastCtx* Ctx, uint32_t ms) {
 	pthread_mutex_lock(&Ctx->Mutex);
 	Ctx->playDedupeMs = ms;
+	pthread_mutex_unlock(&Ctx->Mutex);
+}
+
+void CastSetGeneration(struct sCastCtx* Ctx, uint32_t generation) {
+	pthread_mutex_lock(&Ctx->Mutex);
+	Ctx->generation = generation;
 	pthread_mutex_unlock(&Ctx->Mutex);
 }
 

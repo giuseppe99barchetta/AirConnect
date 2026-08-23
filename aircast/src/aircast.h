@@ -61,6 +61,7 @@ typedef struct sMRConfig
 	bool		PersistentStream;
 	uint32_t	PlayDedupeMs;
 	bool		RecoveryEnabled;
+	uint32_t	GroupStartupGraceMs;
 } tMRConfig;
 
 struct sMR {
@@ -88,9 +89,11 @@ struct sMR {
    } *GroupMaster;
    bool Remove;
 	cast_session_state_t CastSession;
-	uint32_t Generation, SessionStarted, SoftPausedAt, LastRecoveryAt;
+	uint32_t Generation, SessionStarted, SoftPausedAt, ResumeStartedAt, LastRecoveryAt;
 	uint32_t RetryCount, ReaderStalls, Reloads;
+	uint32_t TotalRetries, TotalReaderStalls, TotalReloads;
 	uint32_t FirstRtpAt, FirstSyncAt, FirstAudioAt, HttpGetAt, FirstReadAt, CastPlayingAt;
+	uint32_t ResumeLatencyMs;
 	char StreamUri[STR_LEN];
 };
 
