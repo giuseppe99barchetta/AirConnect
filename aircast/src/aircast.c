@@ -8,6 +8,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <inttypes.h>
@@ -23,6 +24,7 @@
 #include "cross_ssl.h"
 
 #include "aircast.h"
+#include "device_filter.h"
 #include "metadata.h"
 #include "cast_util.h"
 #include "cast_parse.h"
@@ -98,6 +100,10 @@ static bool				glMetricsRunning;
 static int				glMetricsSock = -1;
 static pthread_t			glMetricsThread;
 static bool				glMusicAssistantProfile;
+
+static bool IsExcludedDevice(const char *name) {
+	return DeviceNameExcluded(getenv("AIRCONNECT_EXCLUDE_DEVICES"), name);
+}
 
 static void ApplyMusicAssistantProfile(tMRConfig *config) {
 	config->SoftFlush = config->GroupOptimized = config->PersistentStream = config->RecoveryEnabled = true;
@@ -890,6 +896,12 @@ static bool mDNSsearchCallback(mdnssd_service_t *slist, void *cookie, bool *stop
 
 		Name = GetmDNSAttribute(s->attr, s->attr_count, "fn");
 		if (!Name) Name = strdup(s->hostname);
+		if (IsExcludedDevice(Name)) {
+			LOG_INFO("Ignoring excluded renderer (%s)", Name);
+			NFREE(UDN);
+			NFREE(Name);
+			continue;
+		}
 		
 		if (AddCastDevice(Device, Name, UDN, Group, s->addr, s->port) && !glDiscovery) {
 			Device->Raop = raopsr_create(glHost, glmDNSServer, Device->Config.Name,

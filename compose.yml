@@ -5,6 +5,9 @@ services:
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 20s
+    environment:
+      # Comma-separated Chromecast names to hide, e.g. Studio,Sala,Proiettore
+      AIRCONNECT_EXCLUDE_DEVICES: ${AIRCONNECT_EXCLUDE_DEVICES:-}
     volumes:
       - ./config.music-assistant.xml:/config.xml:ro
     command:

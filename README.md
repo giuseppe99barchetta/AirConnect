@@ -116,6 +116,19 @@ source RTP/PCM/output PCM counters, HTTP bytes served, Cast media-session ID
 and `currentTime`, plus the separate startup intervals. `DESIGN.md` describes
 the recovery state model and metric interpretation.
 
+### Hiding discovered Cast devices
+
+Set `AIRCONNECT_EXCLUDE_DEVICES` to a comma-separated list of exact
+Chromecast display names. Matching ignores case and surrounding whitespace:
+
+```yaml
+environment:
+  AIRCONNECT_EXCLUDE_DEVICES: "Studio,Sala,Proiettore"
+```
+
+Excluded devices are ignored during mDNS discovery and never receive a
+virtual AirPlay renderer. Restart the container after changing the value.
+
 These are the global parameters
 
 - `max_players`            : set the maximum of players (default 32)
