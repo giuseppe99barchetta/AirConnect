@@ -1128,8 +1128,8 @@ static bool ParseArgs(int argc, char **argv) {
 			return false;
 		case '-':
 			if (!strcmp(opt + 1, "noflush")) glMRConfig.Flush = false;
-			else if (!strcmp(opt + 1, "profile") && !strcmp(optarg, "music-assistant") && !glMusicAssistantProfile) {
-				ApplyMusicAssistantProfile(&glMRConfig);
+			else if (!strcmp(opt + 1, "profile") && !strcmp(optarg, "music-assistant")) {
+				if (!glMusicAssistantProfile) ApplyMusicAssistantProfile(&glMRConfig);
 				glMusicAssistantProfile = true;
 			}
 			else if (!strcmp(opt + 1, "metrics-port")) glMetricsPort = strtoul(optarg, NULL, 10);
