@@ -4,4 +4,13 @@ services:
     container_name: airconnect
     network_mode: host
     restart: unless-stopped
-    command: ["-Z", "--profile", "music-assistant", "--metrics-port", "9876", "-d", "all=info"]
+    command:
+      - -Z
+      - --profile
+      - music-assistant
+      - --metrics-port
+      - "9876"
+      - -l
+      - "0:700"
+      - -d
+      - all=info
