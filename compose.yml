@@ -7,7 +7,17 @@ services:
     stop_grace_period: 20s
     volumes:
       - ./config.music-assistant.xml:/config.xml:ro
-    command: ["-Z", "-x", "/config.xml", "--profile", "music-assistant", "--metrics-port", "9876", "-d", "all=info"]
+    command:
+      - -Z
+      - -x
+      - /config.xml
+      - --profile
+      - music-assistant
+      - --metrics-port
+      - "9876"
+      - -r
+      - -d
+      - all=info
     logging:
       driver: local
       options:
