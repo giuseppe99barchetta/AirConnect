@@ -13,5 +13,8 @@
     <persistent_stream>1</persistent_stream>
     <play_dedupe_ms>250</play_dedupe_ms>
     <recovery_enabled>1</recovery_enabled>
+    <discontinuity_recovery>1</discontinuity_recovery>
+    <source_stall_ms>2500</source_stall_ms>
+    <metadata_transport_updates>0</metadata_transport_updates>
   </common>
 </aircast>

@@ -20,6 +20,7 @@ struct sCastCtx;
 
 void	CastGetStatus(struct sCastCtx *Ctx);
 void	CastGetMediaStatus(struct sCastCtx *Ctx);
+int	CastGetMediaSessionId(struct sCastCtx *Ctx);
 
 void 	CastPowerOff(struct sCastCtx *Ctx);
 bool 	CastPowerOn(struct sCastCtx *Ctx);

@@ -93,6 +93,29 @@ The default configuration file is `config.xml`, stored in the same directory as 
 - `media_volume	<0..1>` : (default 0.5) Applies a scaling factor to device's hardware volume (chromecast only)
 - `codec <mp3[:<bitrate(192)>]|aac[:<bitrate(128)>]|flac[:0..9(5)][/1152...16384(4096)]|wav|pcm>`	: format used to send HTTP audio. FLAC is recommended but uses more CPU (pcm only available for UPnP). For example, `mp3:320` for 320Kb/s MP3 encoding. Flac's second parameter is blocksize that can be reduced to 1152 for lower latency.
 
+### Music Assistant / Cast groups
+
+`--profile music-assistant` enables the optional recovery profile used by this
+fork. Its matching example is `config.music-assistant.xml`. It leaves normal
+upstream behaviour unchanged unless the profile (or the following XML options)
+is enabled:
+
+- `discontinuity_recovery <0|1>`: when Cast closes its HTTP media connection
+  while decoded RAOP audio is still fresh, discard old PCM and issue a fresh
+  Cast `LOAD` at the current live edge. It is deliberately not a `PLAY` retry.
+- `source_stall_ms <ms>`: time without decoded RAOP audio after a closed RTSP
+  control connection before the source is treated as discontinuous (2500 in
+  the profile).
+- `metadata_transport_updates <0|1>`: permits legacy metadata-as-Cast-`PLAY`.
+  The profile sets this to `0` so metadata cannot disturb transport timing.
+
+With `--metrics-port <port>`, Prometheus metrics are at `/metrics`. The
+discontinuity-focused metrics include RAOP control and Cast HTTP disconnect
+counters, RTP/audio/read ages, stream generation and discontinuity count,
+source RTP/PCM/output PCM counters, HTTP bytes served, Cast media-session ID
+and `currentTime`, plus the separate startup intervals. `DESIGN.md` describes
+the recovery state model and metric interpretation.
+
 These are the global parameters
 
 - `max_players`            : set the maximum of players (default 32)

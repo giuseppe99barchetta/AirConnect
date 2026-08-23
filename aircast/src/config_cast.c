@@ -80,6 +80,9 @@ void SaveConfig(char *name, void *ref, bool full) {
 	XMLUpdateNode(doc, common, false, "play_dedupe_ms", "%u", glMRConfig.PlayDedupeMs);
 	XMLUpdateNode(doc, common, false, "recovery_enabled", "%d", glMRConfig.RecoveryEnabled);
 	XMLUpdateNode(doc, common, false, "group_startup_grace_ms", "%u", glMRConfig.GroupStartupGraceMs);
+	XMLUpdateNode(doc, common, false, "discontinuity_recovery", "%d", glMRConfig.DiscontinuityRecovery);
+	XMLUpdateNode(doc, common, false, "source_stall_ms", "%u", glMRConfig.SourceStallMs);
+	XMLUpdateNode(doc, common, false, "metadata_transport_updates", "%d", glMRConfig.MetadataTransportUpdates);
 
 	for (int i = 0; i < glMaxDevices; i++) {
 		IXML_Node *dev_node;
@@ -148,6 +151,9 @@ static void LoadConfigItem(tMRConfig *Conf, char *name, char *val) {
 	if (!strcmp(name, "play_dedupe_ms")) Conf->PlayDedupeMs = strtoul(val, NULL, 10);
 	if (!strcmp(name, "recovery_enabled")) Conf->RecoveryEnabled = atoi(val);
 	if (!strcmp(name, "group_startup_grace_ms")) Conf->GroupStartupGraceMs = strtoul(val, NULL, 10);
+	if (!strcmp(name, "discontinuity_recovery")) Conf->DiscontinuityRecovery = atoi(val);
+	if (!strcmp(name, "source_stall_ms")) Conf->SourceStallMs = strtoul(val, NULL, 10);
+	if (!strcmp(name, "metadata_transport_updates")) Conf->MetadataTransportUpdates = atoi(val);
 	if (!strcmp(name, "name")) strcpy(Conf->Name, val);
 	if (!strcmp(name, "mac"))  {
 		unsigned mac[6];

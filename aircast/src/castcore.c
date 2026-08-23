@@ -664,7 +664,7 @@ static void *CastSocketThread(void *args) {
 
 					if (Ctx->sessionId && Ctx->transportId) {
 						Ctx->Status = CAST_LAUNCHED;
-						LOG_INFO("[%p]: Receiver launched", Ctx->owner);
+						LOG_INFO("[%p]: Receiver launched session=%s transport=%s", Ctx->owner, Ctx->sessionId, Ctx->transportId);
 						SendCastMessage(Ctx, CAST_CONNECTION, Ctx->transportId,
 									"{\"type\":\"CONNECT\",\"origin\":{}}");
 					}

@@ -273,6 +273,14 @@ void CastPlay(struct sCastCtx* Ctx, struct metadata_s* MetaData) {
 	pthread_mutex_unlock(&Ctx->Mutex);
 }
 
+int CastGetMediaSessionId(struct sCastCtx *Ctx) {
+	if (!Ctx) return 0;
+	pthread_mutex_lock(&Ctx->Mutex);
+	int mediaSessionId = Ctx->mediaSessionId;
+	pthread_mutex_unlock(&Ctx->Mutex);
+	return mediaSessionId;
+}
+
 void CastPlayRetry(struct sCastCtx* Ctx) {
 	pthread_mutex_lock(&Ctx->Mutex);
 	Ctx->lastPlayMs = 0;

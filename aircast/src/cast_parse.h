@@ -14,6 +14,7 @@
 
 int 		GetMediaItem_I(json_t *root, int n, char *item);
 double 		GetMediaItem_F(json_t *root, int n, char *item);
+bool		GetMediaItem_FV(json_t *root, int n, char *item, double *value);
 const char* GetMediaItem_S(json_t *root, int n, char *item);
 const char* GetAppIdItem(json_t *root, char* appId, char *item);
 const char* GetMediaInfoItem_S(json_t *root, int n, char *item);

@@ -67,6 +67,17 @@ double GetMediaItem_F(json_t *root, int n, char *item)
 	return json_number_value(elm);
 }
 
+bool GetMediaItem_FV(json_t *root, int n, char *item, double *value)
+{
+	json_t *elm;
+
+	if (!value || (elm = json_object_get(root, "status")) == NULL) return false;
+	if ((elm = json_array_get(elm, n)) == NULL) return false;
+	if ((elm = json_object_get(elm, item)) == NULL || !json_is_number(elm)) return false;
+	*value = json_number_value(elm);
+	return true;
+}
+
 
 /*----------------------------------------------------------------------------*/
 bool GetMediaVolume(json_t *root, int n, double *volume, bool *muted)

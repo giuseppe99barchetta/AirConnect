@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <inttypes.h>
 #include <locale.h>
 #ifdef _WIN32
 #include <process.h>
@@ -58,9 +59,10 @@ tMRConfig			glMRConfig = {
 							MEDIA_VOLUME,	// media volume (0..1)
 							{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
 							"",		// rtp/http_latency (0 = use client's request)
-							false,	// drift
-							"", 	// artwork
-					};
+					false,	// drift
+					"", 	// artwork
+					false, 0, 0, 0, 0, false, 0, false, 0, false, 0, false, 0, true,
+				};
 
 
 
@@ -102,6 +104,9 @@ static void ApplyMusicAssistantProfile(tMRConfig *config) {
 	config->SoftFlushTimeoutMs = 1500; config->ReaderStallMs = 1200; config->PlayRetryMs = 700;
 	config->MaxRetries = 3; config->PrebufferMs = 150; config->PlayDedupeMs = 250;
 	config->GroupStartupGraceMs = 4000;
+	config->DiscontinuityRecovery = true;
+	config->SourceStallMs = 2500;
+	config->MetadataTransportUpdates = false;
 }
 
 static char usage[] =
@@ -207,6 +212,11 @@ static void *MetricsThread(void *args) {
 			if (p->Running) {
 				raopsr_stats_t stats = { 0 };
 				raopsr_get_stats(p->Raop, &stats);
+				uint32_t now = gettime_ms();
+				uint32_t rtpAge = stats.last_rtp_ms ? now - stats.last_rtp_ms : 0;
+				uint32_t audioAge = stats.last_audio_ms ? now - stats.last_audio_ms : 0;
+				uint32_t readAge = stats.last_read_ms ? now - stats.last_read_ms : 0;
+				uint32_t rtspAge = stats.last_rtsp_command_ms ? now - stats.last_rtsp_command_ms : 0;
 				int written = snprintf(body + used, sizeof(body) - used,
 				"airconnect_cast_startup_latency_ms{device=\"%s\"} %u\n"
 				"airconnect_cast_resume_latency_ms{device=\"%s\"} %u\n"
@@ -214,11 +224,46 @@ static void *MetricsThread(void *args) {
 				"airconnect_cast_retries_total{device=\"%s\"} %u\n"
 				"airconnect_cast_reloads_total{device=\"%s\"} %u\n"
 				"airconnect_buffer_fill_frames{device=\"%s\"} %u\n"
-				"airconnect_session_state{device=\"%s\"} %u\n",
+				"airconnect_session_state{device=\"%s\"} %u\n"
+				"airconnect_raop_control_disconnects_total{device=\"%s\"} %u\n"
+				"airconnect_cast_http_disconnects_total{device=\"%s\"} %u\n"
+				"airconnect_cast_http_reconnects_total{device=\"%s\"} %u\n"
+				"airconnect_last_rtsp_command_age_ms{device=\"%s\"} %u\n"
+				"airconnect_last_rtp_age_ms{device=\"%s\"} %u\n"
+				"airconnect_last_raop_audio_age_ms{device=\"%s\"} %u\n"
+				"airconnect_last_http_read_age_ms{device=\"%s\"} %u\n"
+				"airconnect_stream_discontinuities_total{device=\"%s\"} %u\n"
+				"airconnect_stream_generation{device=\"%s\"} %u\n"
+				"airconnect_cast_media_session_id{device=\"%s\"} %d\n"
+				"airconnect_cast_current_time_ms{device=\"%s\"} %.3f\n"
+				"airconnect_raop_source_rtp_timestamp{device=\"%s\"} %u\n"
+				"airconnect_raop_source_pcm_frames_total{device=\"%s\"} %" PRIu64 "\n"
+				"airconnect_raop_output_pcm_frames_total{device=\"%s\"} %" PRIu64 "\n"
+				"airconnect_cast_http_bytes_served_total{device=\"%s\"} %" PRIu64 "\n"
+				"airconnect_raop_session_to_first_rtp_ms{device=\"%s\"} %u\n"
+				"airconnect_raop_session_to_first_audio_ms{device=\"%s\"} %u\n"
+				"airconnect_first_audio_to_http_get_ms{device=\"%s\"} %u\n"
+				"airconnect_first_audio_to_http_read_ms{device=\"%s\"} %u\n"
+				"airconnect_first_audio_to_cast_playing_ms{device=\"%s\"} %u\n"
+				"airconnect_cast_load_to_playing_ms{device=\"%s\"} %u\n",
 				p->Config.Name, p->CastPlayingAt ? p->CastPlayingAt - p->SessionStarted : 0,
 				p->Config.Name, p->ResumeLatencyMs, p->Config.Name, p->TotalReaderStalls,
 				p->Config.Name, p->TotalRetries, p->Config.Name, p->TotalReloads, p->Config.Name, stats.fill,
-				p->Config.Name, (unsigned) p->CastSession);
+				p->Config.Name, (unsigned) p->CastSession,
+				p->Config.Name, stats.control_disconnects, p->Config.Name, stats.http_disconnects,
+				p->Config.Name, stats.http_reconnects, p->Config.Name, rtspAge, p->Config.Name, rtpAge,
+				p->Config.Name, audioAge, p->Config.Name, readAge,
+				p->Config.Name, p->TotalDiscontinuities, p->Config.Name, p->Generation,
+				p->Config.Name, CastGetMediaSessionId(p->CastCtx),
+				p->Config.Name, p->CastCurrentTimeMs, p->Config.Name, stats.source_rtp_timestamp,
+				p->Config.Name, stats.source_pcm_frames, p->Config.Name, stats.output_pcm_frames,
+				p->Config.Name, stats.http_bytes_served,
+				p->Config.Name, stats.first_rtp_ms ? stats.first_rtp_ms - p->SessionStarted : 0,
+				p->Config.Name, stats.first_audio_ms ? stats.first_audio_ms - p->SessionStarted : 0,
+				p->Config.Name, p->HttpGetAt && p->FirstAudioAt ? p->HttpGetAt - p->FirstAudioAt : 0,
+				p->Config.Name, p->FirstReadAt && p->FirstAudioAt ? p->FirstReadAt - p->FirstAudioAt : 0,
+				p->Config.Name, p->CastPlayingAt && p->FirstAudioAt ? p->CastPlayingAt - p->FirstAudioAt : 0,
+				p->Config.Name, p->CastPlayingAt && p->CastLoadAt ? p->CastPlayingAt - p->CastLoadAt : 0);
 				used += written < 0 ? 0 : min((size_t) written, sizeof(body) - used - 1);
 			}
 			pthread_mutex_unlock(&p->Mutex);
@@ -263,8 +308,59 @@ static void LoadCurrentStream(struct sMR *device) {
 	else if (strcasestr(device->Config.Codec, "aac")) contentType = "audio/aac";
 	else if (strcasestr(device->Config.Codec, "wav")) contentType = "audio/wav";
 	CastSetGeneration(device->CastCtx, device->Generation);
+	device->CastLoadAt = gettime_ms();
 	CastLoad(device->CastCtx, device->StreamUri, contentType, device->Name, &metadata, 0);
 	CastPlayRetry(device->CastCtx);
+}
+
+static void NewStreamUri(struct sMR *device) {
+	char codec[32] = "flac";
+	(void) !sscanf(device->Config.Codec, "%31[^:]", codec);
+	snprintf(device->StreamUri, sizeof(device->StreamUri), "http://%s:%u/stream-%u-%u.%s",
+		inet_ntoa(glHost), device->RaopHttpPort, device->Generation, gettime_ms(), codec);
+}
+
+static void ResetOutputTimeline(struct sMR *device) {
+	device->HttpGetAt = device->FirstReadAt = device->CastPlayingAt = 0;
+	device->CastLoadAt = device->CastCurrentTimeAt = 0;
+	device->CastCurrentTimeMs = 0;
+}
+
+static bool SourceIsLive(const struct sMR *device, const raopsr_stats_t *stats, uint32_t now) {
+	return stats->last_audio_ms && (!device->Config.SourceStallMs || now - stats->last_audio_ms < device->Config.SourceStallMs);
+}
+
+static bool RecoverCastAtLiveEdge(struct sMR *device, uint32_t now, const raopsr_stats_t *stats) {
+	if (!device->Config.DiscontinuityRecovery || !device->RaopHttpPort || !SourceIsLive(device, stats, now)) return false;
+	LOG_WARN("CAST_HARD_RESYNC generation=%u source_rtp=%u contiguous_rtp=%u fill=%u", device->Generation,
+		stats->source_rtp_timestamp, stats->last_contiguous_rtp_timestamp, stats->fill);
+	device->Generation++;
+	device->TotalDiscontinuities++;
+	device->Reloads++; device->TotalReloads++;
+	device->LastRecoveryAt = now;
+	device->RetryCount = 0;
+	device->ExpectStop = true;
+	device->CastSession = CAST_SESSION_RECOVERING;
+	raopsr_discard_to_live_edge(device->Raop);
+	CastStop(device->CastCtx);
+	NewStreamUri(device);
+	ResetOutputTimeline(device);
+	LoadCurrentStream(device);
+	return true;
+}
+
+static void StopForSourceDiscontinuity(struct sMR *device, uint32_t now, const raopsr_stats_t *stats) {
+	if (device->SourceDiscontinuous) return;
+	device->SourceDiscontinuous = true;
+	device->TotalDiscontinuities++;
+	device->LastRecoveryAt = now;
+	device->ExpectStop = true;
+	device->CastSession = CAST_SESSION_STOPPING;
+	LOG_WARN("RAOP_SOURCE_DISCONTINUITY generation=%u last_audio_age_ms=%u last_rtp_age_ms=%u fill=%u",
+		device->Generation, stats->last_audio_ms ? now - stats->last_audio_ms : 0,
+		stats->last_rtp_ms ? now - stats->last_rtp_ms : 0, stats->fill);
+	raopsr_discard_to_live_edge(device->Raop);
+	CastStop(device->CastCtx);
 }
 
 static void StartRecovery(struct sMR *device, uint32_t now, const char *reason) {
@@ -289,13 +385,13 @@ static void StartRecovery(struct sMR *device, uint32_t now, const char *reason) 
 		device->ExpectStop = true;
 		CastStop(device->CastCtx);
 		device->Generation++; device->Reloads++; device->TotalReloads++;
-		device->HttpGetAt = device->FirstReadAt = device->CastPlayingAt = 0;
+		ResetOutputTimeline(device);
 		LoadCurrentStream(device);
 	} else {
 		LOG_WARN("[%p]: %s, reconnecting receiver generation=%u", device, reason, device->Generation);
 		CastPowerOff(device->CastCtx);
 		device->Generation++; device->Reloads++; device->TotalReloads++;
-		device->HttpGetAt = device->FirstReadAt = device->CastPlayingAt = 0;
+		ResetOutputTimeline(device);
 		LoadCurrentStream(device);
 	}
 }
@@ -334,6 +430,9 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 			Device->SessionStarted = gettime_ms();
 			Device->ResumeStartedAt = Device->ResumeLatencyMs = 0;
 			Device->FirstRtpAt = Device->FirstSyncAt = Device->FirstAudioAt = Device->HttpGetAt = Device->FirstReadAt = Device->CastPlayingAt = 0;
+			Device->CastLoadAt = Device->CastCurrentTimeAt = 0; Device->CastCurrentTimeMs = 0;
+			Device->SourceControlClosed = Device->SourceDiscontinuous = false;
+			Device->SeenControlDisconnects = Device->SeenHttpDisconnects = Device->SeenHttpReconnects = Device->SeenDiscontinuities = 0;
 			Device->StreamUri[0] = '\0'; Device->CastSession = CAST_SESSION_IDLE;
 			Device->State = STOPPED; Device->ExpectStop = false; Device->SoftPausedAt = Device->LastRecoveryAt = 0;
 			LOG_INFO("[%p]: START generation=%u", Device, Device->Generation);
@@ -373,10 +472,8 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 				CastPlayRetry(Device->CastCtx);
 			} else if (Device->RaopState != RAOP_PLAY) {
 				uint16_t port = va_arg(args, uint32_t);
-				static int count;
-				char codec[32] = "flac";
-				(void) !sscanf(Device->Config.Codec, "%31[^:]", codec);
-				snprintf(Device->StreamUri, sizeof(Device->StreamUri), "http://%s:%u/stream-%u.%s", inet_ntoa(glHost), port, count++, codec);
+				Device->RaopHttpPort = port;
+				NewStreamUri(Device);
 				Device->CastSession = CAST_SESSION_STARTING;
 				Device->ExpectStop = false;
 				LoadCurrentStream(Device);
@@ -403,11 +500,15 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 		case RAOP_METADATA: {
 			if (Device->RaopState == RAOP_PLAY) {
 				raopsr_metadata_t* raopMetaData = va_arg(args, raopsr_metadata_t*);
-				struct metadata_s MetaData = { .title = raopMetaData->title,
-											   .album = raopMetaData->album,
-											   .artist = raopMetaData->artist,
-											   .artwork = raopMetaData->artwork };
-				CastPlay(Device->CastCtx, &MetaData);
+				if (Device->Config.MetadataTransportUpdates) {
+					struct metadata_s MetaData = { .title = raopMetaData->title,
+													   .album = raopMetaData->album,
+													   .artist = raopMetaData->artist,
+													   .artwork = raopMetaData->artwork };
+					CastPlay(Device->CastCtx, &MetaData);
+				} else {
+					LOG_DEBUG("[%p]: metadata transport update suppressed", Device);
+				}
 			}
 			break;
 		}
@@ -462,6 +563,11 @@ static void *MRThread(void *args) {
 			// a mediaSessionId has been acquired
 			if (type && !strcasecmp(type, "MEDIA_STATUS")) {
 				const char *state = GetMediaItem_S(data, 0, "playerState");
+				double currentTime;
+				if (GetMediaItem_FV(data, 0, "currentTime", &currentTime) && currentTime >= 0) {
+					p->CastCurrentTimeMs = currentTime * 1000;
+					p->CastCurrentTimeAt = now;
+				}
 
 				if (state && !strcasecmp(state, "PLAYING") && p->State != PLAYING) {
 					bool resumed = p->CastSession == CAST_SESSION_RESUMING;
@@ -542,6 +648,37 @@ static void *MRThread(void *args) {
 			raopsr_stats_t stats;
 			uint32_t now = gettime_ms();
 			if (raopsr_get_stats(p->Raop, &stats)) {
+				uint32_t rtpAge = stats.last_rtp_ms ? now - stats.last_rtp_ms : 0;
+				uint32_t audioAge = stats.last_audio_ms ? now - stats.last_audio_ms : 0;
+				uint32_t readAge = stats.last_read_ms ? now - stats.last_read_ms : 0;
+				bool newHttpClose = stats.http_disconnects != p->SeenHttpDisconnects;
+				if (stats.control_disconnects != p->SeenControlDisconnects) {
+					p->SeenControlDisconnects = stats.control_disconnects;
+					p->SourceControlClosed = true;
+					LOG_WARN("RAOP_CONTROL_CLOSE generation=%u last_rtsp_age_ms=%u last_rtp_age_ms=%u last_audio_age_ms=%u last_http_read_age_ms=%u fill=%u cast_state=%u",
+						p->Generation, stats.last_rtsp_command_ms ? now - stats.last_rtsp_command_ms : 0, rtpAge, audioAge, readAge,
+						stats.fill, (unsigned) p->CastSession);
+				}
+				if (newHttpClose) {
+					p->SeenHttpDisconnects = stats.http_disconnects;
+					LOG_WARN("CAST_HTTP_CLOSE generation=%u duration_ms=%u last_raop_audio_age_ms=%u frames_served=%" PRIu64 " bytes_served=%" PRIu64 " cast_state=%u cast_current_time_ms=%.3f",
+						p->Generation, stats.http_open_ms && stats.http_close_ms ? stats.http_close_ms - stats.http_open_ms : 0,
+						audioAge, stats.output_pcm_frames, stats.http_bytes_served, (unsigned) p->CastSession, p->CastCurrentTimeMs);
+				}
+				if (stats.http_reconnects != p->SeenHttpReconnects) {
+					p->SeenHttpReconnects = stats.http_reconnects;
+					LOG_INFO("CAST_HTTP_RECONNECT generation=%u last_raop_audio_age_ms=%u fill=%u", p->Generation, audioAge, stats.fill);
+				}
+				if (stats.discontinuities != p->SeenDiscontinuities) {
+					p->SeenDiscontinuities = stats.discontinuities;
+					LOG_WARN("STREAM_DISCONTINUITY generation=%u source_rtp=%u contiguous_rtp=%u", p->Generation,
+						stats.source_rtp_timestamp, stats.last_contiguous_rtp_timestamp);
+				}
+				if (p->Config.DiscontinuityRecovery && p->SourceControlClosed && !SourceIsLive(p, &stats, now)) {
+					StopForSourceDiscontinuity(p, now, &stats);
+				}
+				bool hardResync = newHttpClose && !p->SourceDiscontinuous &&
+					p->RaopState == RAOP_PLAY && RecoverCastAtLiveEdge(p, now, &stats);
 				if (stats.first_rtp_ms && !p->FirstRtpAt) {
 					p->FirstRtpAt = stats.first_rtp_ms;
 					LOG_INFO("[%p]: RAOP first_RTP +%ums", p, p->FirstRtpAt - p->SessionStarted);
@@ -563,7 +700,8 @@ static void *MRThread(void *args) {
 					(!stats.last_read_ms || now - stats.last_read_ms >= p->Config.ReaderStallMs);
 				bool resumeTimeout = p->CastSession == CAST_SESSION_RESUMING && p->Config.SoftFlushTimeoutMs &&
 					now - p->ResumeStartedAt >= p->Config.SoftFlushTimeoutMs;
-				if (!waiting && (noGet || noRead) && (p->CastSession != CAST_SESSION_RESUMING || resumeTimeout)) {
+				if (!p->SourceDiscontinuous && !hardResync && !waiting && (noGet || noRead) &&
+					(p->CastSession != CAST_SESSION_RESUMING || resumeTimeout)) {
 					StartRecovery(p, now, resumeTimeout ? "soft resume timed out" : (noGet ? "HTTP GET missing" : "HTTP reader stalled"));
 				}
 			}
@@ -862,8 +1000,12 @@ static bool AddCastDevice(struct sMR *Device, char *Name, char *UDN, bool group,
 	Device->CastSession = CAST_SESSION_IDLE;
 	Device->Generation = Device->SessionStarted = Device->SoftPausedAt = Device->ResumeStartedAt = Device->LastRecoveryAt = 0;
 	Device->RetryCount = Device->ReaderStalls = Device->Reloads = 0;
-	Device->TotalRetries = Device->TotalReaderStalls = Device->TotalReloads = 0;
+	Device->TotalRetries = Device->TotalReaderStalls = Device->TotalReloads = Device->TotalDiscontinuities = 0;
 	Device->FirstRtpAt = Device->FirstSyncAt = Device->FirstAudioAt = Device->HttpGetAt = Device->FirstReadAt = Device->CastPlayingAt = 0;
+	Device->CastLoadAt = Device->CastCurrentTimeAt = 0; Device->CastCurrentTimeMs = 0;
+	Device->RaopHttpPort = 0;
+	Device->SeenControlDisconnects = Device->SeenHttpDisconnects = Device->SeenHttpReconnects = Device->SeenDiscontinuities = 0;
+	Device->SourceControlClosed = Device->SourceDiscontinuous = false;
 	Device->ResumeLatencyMs = 0;
 	Device->StreamUri[0] = '\0';
 	Device->VolumeStampRx = Device->VolumeStampTx = gettime_ms() - 2000;
