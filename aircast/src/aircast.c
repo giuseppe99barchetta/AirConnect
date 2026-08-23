@@ -101,7 +101,7 @@ static void ApplyMusicAssistantProfile(tMRConfig *config) {
 	config->SoftFlush = config->GroupOptimized = config->PersistentStream = config->RecoveryEnabled = true;
 	config->SoftFlushTimeoutMs = 1500; config->ReaderStallMs = 1200; config->PlayRetryMs = 700;
 	config->MaxRetries = 3; config->PrebufferMs = 150; config->PlayDedupeMs = 250;
-	config->GroupStartupGraceMs = 1500;
+	config->GroupStartupGraceMs = 4000;
 }
 
 static char usage[] =
