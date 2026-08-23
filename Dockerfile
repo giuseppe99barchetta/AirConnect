@@ -2,6 +2,7 @@ FROM debian:bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
+RUN grep -q 'raopsr_get_stats' common/libraop/src/raop_server.h || patch -p1 -d common/libraop < patches/libraop-music-assistant.patch
 RUN make -C aircast/tests
 RUN make -C common/libraop CC=gcc HOST=linux PLATFORM=x86_64 OPENSSL=/usr lib \
  && cp common/libraop/lib/linux/x86_64/libraop.a common/libraop/targets/linux/x86_64/libraop.a \

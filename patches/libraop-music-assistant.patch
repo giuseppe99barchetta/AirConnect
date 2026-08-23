@@ -1,0 +1,252 @@
+diff --git a/src/raop_server.c b/src/raop_server.c
+index 53a89ff..ca33c9b 100644
+--- a/src/raop_server.c
++++ b/src/raop_server.c
+@@ -63,6 +63,9 @@ typedef struct raopsr_s {
+ 		uint16_t base, range;
+ 	} ports;
+ 	int http_length;
++	bool soft_flush;
++	uint32_t prebuffer_ms;
++	pthread_mutex_t session_mutex;
+ } raopsr_t;
+ 
+ extern log_level	raop_loglevel;
+@@ -106,6 +109,7 @@ struct raopsr_s *raopsr_create(struct in_addr host, struct mdnsd *svr, char *nam
+ 
+ 	// make sure we have a clean context
+ 	memset(ctx, 0, sizeof(raopsr_t));
++	pthread_mutex_init(&ctx->session_mutex, NULL);
+ 
+ 	ctx->http_length = http_length;
+ 	ctx->ports.base = port_base;
+@@ -133,6 +137,7 @@ struct raopsr_s *raopsr_create(struct in_addr host, struct mdnsd *svr, char *nam
+ 	if (ctx->sock < 0 || listen(ctx->sock, 4)) {
+ 		LOG_ERROR("Cannot bind or listen RTSP listener: %s", strerror(errno));
+ 		closesocket(ctx->sock);
++		pthread_mutex_destroy(&ctx->session_mutex);
+ 		free(ctx);
+ 		return NULL;
+ 	}
+@@ -189,6 +194,21 @@ void raopsr_update(struct raopsr_s *ctx, char *name, char *model) {
+ 	free(id);
+ }
+ 
++void raopsr_set_stream_options(struct raopsr_s *ctx, bool soft_flush, uint32_t prebuffer_ms) {
++	if (!ctx) return;
++	ctx->soft_flush = soft_flush;
++	ctx->prebuffer_ms = prebuffer_ms;
++}
++
++bool raopsr_get_stats(struct raopsr_s *ctx, raopsr_stats_t *stats) {
++	bool ok = false;
++	if (!ctx || !stats) return false;
++	pthread_mutex_lock(&ctx->session_mutex);
++	if (ctx->ht) ok = raopst_get_stats(ctx->ht, stats);
++	pthread_mutex_unlock(&ctx->session_mutex);
++	return ok;
++}
++
+ /*----------------------------------------------------------------------------*/
+ void raopsr_delete(struct raopsr_s *ctx) {
+ 	if (!ctx) return;
+@@ -197,7 +217,12 @@ void raopsr_delete(struct raopsr_s *ctx) {
+ 	pthread_join(ctx->thread, NULL);
+ 
+ 	raopsr_metadata_free(&ctx->metadata);
+-	raopst_end(ctx->ht);
++	pthread_mutex_lock(&ctx->session_mutex);
++	struct raopst_s *ht = ctx->ht;
++	ctx->ht = NULL;
++	pthread_mutex_unlock(&ctx->session_mutex);
++	raopst_end(ht);
++	pthread_mutex_destroy(&ctx->session_mutex);
+ 
+ #if WIN
+ 	shutdown(ctx->sock, SD_BOTH);
+@@ -511,7 +536,10 @@ static bool handle_rtsp(raopsr_t *ctx, int sock)
+ 							ctx->ports.range, ctx->http_length);
+ 
+ 		ctx->hport = ht.hport;
++		pthread_mutex_lock(&ctx->session_mutex);
+ 		ctx->ht = ht.ctx;
++		raopst_set_options(ctx->ht, ctx->soft_flush, ctx->prebuffer_ms);
++		pthread_mutex_unlock(&ctx->session_mutex);
+ 		ctx->flushedArtwork = true;
+ 
+ 		if ((cport * tport * ht.cport * ht.tport * ht.aport * ht.hport) != 0 && ht.ctx) {
+@@ -567,9 +595,11 @@ static bool handle_rtsp(raopsr_t *ctx, int sock)
+ 
+ 		ctx->raop_cb(ctx->owner, RAOP_STOP);
+ 		raopsr_metadata_free(&ctx->metadata);
+-		raopst_end(ctx->ht);
+-
++		pthread_mutex_lock(&ctx->session_mutex);
++		struct raopst_s *ht = ctx->ht;
+ 		ctx->ht = NULL;
++		pthread_mutex_unlock(&ctx->session_mutex);
++		raopst_end(ht);
+ 		ctx->hport = -1;
+ 
+ 		// need to make sure no search is on-going and reclaim pthread memory
+diff --git a/src/raop_server.h b/src/raop_server.h
+index 642fc9f..f7351c5 100644
+--- a/src/raop_server.h
++++ b/src/raop_server.h
+@@ -23,6 +23,12 @@ typedef enum { RAOP_STREAM, RAOP_PLAY, RAOP_FLUSH, RAOP_PAUSE, RAOP_STOP, RAOP_V
+ typedef void (*raopsr_cb_t)(void *owner, raopsr_event_t event, ...);
+ typedef void (*raop_http_cb_t)(void *owner, struct key_data_s *headers, struct key_data_s *response);
+ 
++typedef struct {
++	uint32_t written, read, fill;
++	uint32_t last_write_ms, last_read_ms, first_rtp_ms, first_sync_ms, first_audio_ms;
++	bool http_connected;
++} raopsr_stats_t;
++
+ // set http_length to -3 for chunked-encoding, 0 for no content-length or to a positive value
+ struct raopsr_s* raopsr_create(struct in_addr host, struct mdnsd *svr, char *name,
+ 						  char *model, unsigned char mac[6], char *stream_codec, bool stream_metadata,
+@@ -33,6 +39,8 @@ struct raopsr_s* raopsr_create(struct in_addr host, struct mdnsd *svr, char *nam
+ void	raopsr_update(struct raopsr_s *ctx, char *name, char *model);
+ void  	raopsr_delete(struct raopsr_s *ctx);
+ void	raopsr_notify(struct raopsr_s *ctx, raopsr_event_t event, void *param);
++void	raopsr_set_stream_options(struct raopsr_s *ctx, bool soft_flush, uint32_t prebuffer_ms);
++bool	raopsr_get_stats(struct raopsr_s *ctx, raopsr_stats_t *stats);
+ 
+ void	raopsr_metadata_free(raopsr_metadata_t* data);
+ void	raopsr_metadata_copy(raopsr_metadata_t* dst, raopsr_metadata_t *src);
+diff --git a/src/raop_streamer.c b/src/raop_streamer.c
+index d09ffed..ef27434 100644
+--- a/src/raop_streamer.c
++++ b/src/raop_streamer.c
+@@ -123,6 +123,8 @@ typedef struct raopst_s {
+ 	size_t http_count;
+ 	int http_length;
+ 	bool close_socket;
++	bool soft_flush, start_notified;
++	uint32_t prebuffer_ms, last_write_ms, last_read_ms, first_rtp_ms, first_sync_ms, first_audio_ms;
+ } raopst_t;
+ 
+ #define BUFIDX(seqno) ((seq_t)(seqno) % BUFFER_FRAMES)
+@@ -301,6 +303,30 @@ void raopst_metadata(struct raopst_s *ctx, raopsr_metadata_t *metadata) {
+ 	pthread_mutex_unlock(&ctx->ab_mutex);
+ }
+ 
++void raopst_set_options(struct raopst_s *ctx, bool soft_flush, uint32_t prebuffer_ms) {
++	if (!ctx) return;
++	pthread_mutex_lock(&ctx->ab_mutex);
++	ctx->soft_flush = soft_flush;
++	ctx->prebuffer_ms = prebuffer_ms;
++	pthread_mutex_unlock(&ctx->ab_mutex);
++}
++
++bool raopst_get_stats(struct raopst_s *ctx, raopsr_stats_t *stats) {
++	if (!ctx || !stats) return false;
++	pthread_mutex_lock(&ctx->ab_mutex);
++	stats->written = ctx->ab_write;
++	stats->read = ctx->ab_read;
++	stats->fill = (uint16_t) (ctx->ab_write - ctx->ab_read + 1);
++	stats->last_write_ms = ctx->last_write_ms;
++	stats->last_read_ms = ctx->last_read_ms;
++	stats->first_rtp_ms = ctx->first_rtp_ms;
++	stats->first_sync_ms = ctx->first_sync_ms;
++	stats->first_audio_ms = ctx->first_audio_ms;
++	stats->http_connected = ctx->http_ready;
++	pthread_mutex_unlock(&ctx->ab_mutex);
++	return true;
++}
++
+ /*---------------------------------------------------------------------------*/
+ void raopst_end(raopst_t *ctx) {
+ 	if (!ctx) return;
+@@ -338,7 +364,15 @@ bool raopst_flush(raopst_t *ctx, unsigned short seqno, unsigned int rtptime, boo
+ 	ctx->first_seqno = seqno;
+ 	bool flushed = true;
+ 
+-	if (silence) {
++	if (ctx->soft_flush) {
++		buffer_reset(ctx->audio_buffer);
++		ctx->state = RTP_WAIT;
++		ctx->synchro.first = false;
++		ctx->ab_read = ctx->ab_write + 1;
++		ctx->http_count = 0;
++		ctx->start_notified = false;
++		encoder_close(ctx->encoder);
++	} else if (silence) {
+ 		ctx->pause = true;
+ 	} else if (ctx->state == RTP_PLAY) {
+ 		buffer_reset(ctx->audio_buffer);
+@@ -495,6 +529,7 @@ static void buffer_put_packet(raopst_t* ctx, seq_t seqno, unsigned rtptime, bool
+ 	if (seqno == (uint16_t) (ctx->ab_write + 1)) {
+ 		// expected packet
+ 		ctx->ab_write = seqno;
++		ctx->last_write_ms = gettime_ms();
+ 		LOG_SDEBUG("[%p]: packet expected seqno:%hu rtptime:%u (W:%hu R:%hu)", ctx, seqno, rtptime, ctx->ab_write, ctx->ab_read);
+ 	} else if (seq_order(ctx->ab_write, seqno)) {
+ 		// newer than expected
+@@ -519,6 +554,7 @@ static void buffer_put_packet(raopst_t* ctx, seq_t seqno, unsigned rtptime, bool
+ 		}
+ 		LOG_DEBUG("[%p]: packet newer seqno:%hu rtptime:%u (W:%hu R:%hu)", ctx, seqno, rtptime, ctx->ab_write, ctx->ab_read);
+ 		ctx->ab_write = seqno;
++		ctx->last_write_ms = gettime_ms();
+ 	} else if (seq_order(ctx->ab_read, seqno + 1)) {
+ 		// recovered packet, not yet sent
+ 		LOG_DEBUG("[%p]: packet recovered seqno:%hu rtptime:%u (W:%hu R:%hu)", ctx, seqno, rtptime, ctx->ab_write, ctx->ab_read);
+@@ -547,8 +583,13 @@ static void buffer_put_packet(raopst_t* ctx, seq_t seqno, unsigned rtptime, bool
+ 		if (silence && ctx->ab_write - ctx->ab_read > 1) ctx->audio_buffer[BUFIDX(ctx->ab_read++)].ready = false;
+ 
+ 		if (ctx->state == RTP_PLAY && ctx->silence && !silence) {
+-			ctx->event_cb(ctx->owner, RAOP_STREAMER_PLAY);
+-			ctx->silence = false;
++			uint32_t frames = (uint16_t) (ctx->ab_write - ctx->ab_read + 1);
++			uint32_t needed = (ctx->prebuffer_ms * 44100) / (ctx->frame_size * 1000);
++			if (!ctx->start_notified && frames >= needed) {
++				ctx->event_cb(ctx->owner, RAOP_STREAMER_PLAY);
++				ctx->start_notified = true;
++				ctx->silence = false;
++			}
+ 			// if we have some metadata, just do a refresh (case of FLUSH not sending metadata)
+ 			if (ctx->metadata.title) ctx->icy.updated = true;
+ 		}
+@@ -625,6 +666,7 @@ static void *rtp_thread_func(void *arg) {
+ 				if (plen < 16) break;
+ 
+ 				if ((packet[1] & 0x80) && (type != 0x56)) {
++					if (!ctx->first_audio_ms) ctx->first_audio_ms = gettime_ms();
+ 					LOG_INFO("[%p]: 1st audio packet received %hu", ctx, seqno);
+ 				}
+ 
+@@ -648,12 +690,14 @@ static void *rtp_thread_func(void *arg) {
+ 
+ 				// now we are synced on RTP frames
+ 				if ((ctx->synchro.status & RTP_SYNC) == 0) {
++					ctx->first_rtp_ms = gettime_ms();
+ 					ctx->synchro.status |= RTP_SYNC;
+ 					LOG_INFO("[%p]: 1st RTP packet received", ctx);
+ 				}
+ 
+ 				// 1st sync packet received (signals a restart of playback)
+ 				if (packet[0] & 0x10) {
++					if (!ctx->first_sync_ms) ctx->first_sync_ms = gettime_ms();
+ 					ctx->synchro.first = true;
+ 					LOG_INFO("[%p]: 1st sync packet received", ctx);
+ 				}
+@@ -912,6 +956,7 @@ static short *_buffer_get_frame(raopst_t *ctx, size_t *bytes) {
+ 	}
+ 
+ 	ctx->ab_read++;
++	ctx->last_read_ms = gettime_ms();
+ 	return curframe->data;
+ }
+ 
+diff --git a/src/raop_streamer.h b/src/raop_streamer.h
+index da75199..3dba356 100644
+--- a/src/raop_streamer.h
++++ b/src/raop_streamer.h
+@@ -33,3 +33,5 @@ bool 				raopst_flush(struct raopst_s *ctx, unsigned short seqno, unsigned rtpti
+ void 				raopst_flush_release(struct raopst_s *ctx);
+ void 				raopst_record(struct raopst_s *ctx, unsigned short seqno, unsigned rtptime);
+ void 				raopst_metadata(struct raopst_s *ctx, raopsr_metadata_t *metadata);
++void				raopst_set_options(struct raopst_s *ctx, bool soft_flush, uint32_t prebuffer_ms);
++bool				raopst_get_stats(struct raopst_s *ctx, raopsr_stats_t *stats);
+
