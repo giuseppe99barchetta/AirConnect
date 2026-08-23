@@ -4,11 +4,11 @@
     <codec>flac</codec>
     <soft_flush>1</soft_flush>
     <soft_flush_timeout_ms>1500</soft_flush_timeout_ms>
-    <cast_reader_stall_ms>1200</cast_reader_stall_ms>
+    <cast_reader_stall_ms>2500</cast_reader_stall_ms>
     <cast_play_retry_ms>700</cast_play_retry_ms>
     <cast_max_retries>3</cast_max_retries>
     <group_optimized>1</group_optimized>
-		<group_startup_grace_ms>4000</group_startup_grace_ms>
+		<group_startup_grace_ms>3000</group_startup_grace_ms>
     <prebuffer_ms>150</prebuffer_ms>
     <persistent_stream>1</persistent_stream>
     <play_dedupe_ms>250</play_dedupe_ms>
