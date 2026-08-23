@@ -19,6 +19,9 @@
 #include "cast_util.h"
 
 #define VERSION "v1.11.2"" ("__DATE__" @ "__TIME__")"
+#ifndef AIRCONNECT_BUILD_COMMIT
+#define AIRCONNECT_BUILD_COMMIT "unknown"
+#endif
 
 /*----------------------------------------------------------------------------*/
 /* typedefs */
@@ -95,13 +98,16 @@ struct sMR {
 	uint32_t Generation, SessionStarted, SoftPausedAt, ResumeStartedAt, LastRecoveryAt;
 	uint32_t RetryCount, ReaderStalls, Reloads;
 	uint32_t TotalRetries, TotalReaderStalls, TotalReloads, TotalDiscontinuities;
+	uint32_t TotalHardResyncs, TotalHardResyncSuccess, TotalHardResyncFailures;
 	uint32_t FirstRtpAt, FirstSyncAt, FirstAudioAt, HttpGetAt, FirstReadAt, CastPlayingAt;
 	uint32_t ResumeLatencyMs;
 	uint32_t CastLoadAt, CastCurrentTimeAt;
 	double CastCurrentTimeMs;
 	uint32_t RaopHttpPort;
 	uint32_t SeenControlDisconnects, SeenHttpDisconnects, SeenHttpReconnects, SeenDiscontinuities;
-	bool SourceControlClosed, SourceDiscontinuous;
+	uint32_t HardResyncStartedAt, LastHardResyncDurationMs;
+	uint32_t HardResyncToHttpGetMs, HardResyncToFirstReadMs, HardResyncToCastPlayingMs;
+	bool SourceControlClosed, SourceDiscontinuous, HardResyncInProgress;
 	char StreamUri[STR_LEN];
 };
 

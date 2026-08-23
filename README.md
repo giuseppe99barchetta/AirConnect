@@ -116,6 +116,10 @@ source RTP/PCM/output PCM counters, HTTP bytes served, Cast media-session ID
 and `currentTime`, plus the separate startup intervals. `DESIGN.md` describes
 the recovery state model and metric interpretation.
 
+`airconnect_build_info` identifies the embedded version and Git commit. The
+hard-resync counters and stage durations distinguish attempted, successful
+and failed live-edge recoveries when deploying a moving `latest` image tag.
+
 ### Hiding discovered Cast devices
 
 Set `AIRCONNECT_EXCLUDE_DEVICES` to a comma-separated list of exact

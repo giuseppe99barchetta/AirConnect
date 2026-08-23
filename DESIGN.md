@@ -50,7 +50,8 @@ retry.
 
 The Music Assistant profile records both sides of each session (control/RTP
 timestamps, HTTP open/close, frames served, media status and generation).  A
-source is considered live only while fresh decoded RTP audio is arriving.  If
+source is considered live only while fresh decoded PCM is arriving; raw RTP
+alone is deliberately insufficient. If
 the RTSP control socket closes and that audio later becomes stale, the source
 timeline is marked discontinuous, Cast is stopped, and the process waits for
 a new RAOP generation.  It never keeps feeding old buffered audio.
@@ -63,6 +64,13 @@ ring write head at the instant of invalidation; all frames before it are
 discarded, so the next Cast HTTP GET can receive only current/future source
 audio.  This deliberately favours a short audible recovery over resuming an
 old Cast buffer at a new permanent offset.
+
+Every RAOP generation snapshots the cumulative RAOP/HTTP counters before it
+starts monitoring. A hard resync marks its own forced HTTP close as in
+progress, so that close cannot recursively launch another hard resync. Its
+GET, first-read and Cast-PLAYING stages are logged and exported as metrics;
+failure is recorded only when the fresh load fails to reach GET/read before
+the recovery deadline.
 
 Metadata is not part of that transport state.  The Default Media Receiver has
 no safe metadata-only update used by this fork, so the Music Assistant profile
