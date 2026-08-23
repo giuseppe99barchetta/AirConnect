@@ -53,6 +53,7 @@ typedef struct sCastCtx {
 	uint32_t		lastPong;
 	bool			group;
 	bool			stopReceiver;
+	uint32_t	playDedupeMs, lastPlayMs;
 } tCastCtx;
 
 typedef struct {

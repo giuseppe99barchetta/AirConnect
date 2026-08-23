@@ -37,6 +37,9 @@
 #define SCAN_INTERVAL	30
 
 enum 	eMRstate { STOPPED, PLAYING, PAUSED };
+typedef enum { CAST_SESSION_IDLE, CAST_SESSION_STARTING, CAST_SESSION_PLAYING,
+	CAST_SESSION_SOFT_PAUSED, CAST_SESSION_RESUMING, CAST_SESSION_STOPPING,
+	CAST_SESSION_RECOVERING, CAST_SESSION_FAILED } cast_session_state_t;
 
 typedef struct sMRConfig
 {
@@ -51,6 +54,13 @@ typedef struct sMRConfig
 	char		Latency[STR_LEN];
 	bool		Drift;
 	char		ArtWork[4*STR_LEN];
+	bool		SoftFlush;
+	uint32_t	SoftFlushTimeoutMs, ReaderStallMs, PlayRetryMs, MaxRetries;
+	bool		GroupOptimized;
+	uint32_t	PrebufferMs;
+	bool		PersistentStream;
+	uint32_t	PlayDedupeMs;
+	bool		RecoveryEnabled;
 } tMRConfig;
 
 struct sMR {
@@ -77,6 +87,11 @@ struct sMR {
 		uint16_t				Port;
    } *GroupMaster;
    bool Remove;
+	cast_session_state_t CastSession;
+	uint32_t Generation, SessionStarted, SoftPausedAt, LastRecoveryAt;
+	uint32_t RetryCount, ReaderStalls, Reloads;
+	uint32_t FirstRtpAt, FirstSyncAt, FirstAudioAt, HttpGetAt, FirstReadAt, CastPlayingAt;
+	char StreamUri[STR_LEN];
 };
 
 extern int32_t				glLogLimit;

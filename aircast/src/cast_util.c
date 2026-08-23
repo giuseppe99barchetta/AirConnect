@@ -217,6 +217,13 @@ void CastSimple(struct sCastCtx *Ctx, char *Type) {
 void CastPlay(struct sCastCtx* Ctx, struct metadata_s* MetaData) {
 	// lock on wait for a Cast response
 	pthread_mutex_lock(&Ctx->Mutex);
+	uint32_t now = gettime_ms();
+	if (!MetaData && Ctx->playDedupeMs && now - Ctx->lastPlayMs < Ctx->playDedupeMs) {
+		LOG_DEBUG("[%p]: coalescing PLAY", Ctx->owner);
+		pthread_mutex_unlock(&Ctx->Mutex);
+		return;
+	}
+	Ctx->lastPlayMs = now;
 
 	json_t* customData;
 	if (MetaData && MetaData->live_duration != -1) customData = json_pack("{si}", "liveDuration", MetaData->live_duration);
@@ -262,6 +269,19 @@ void CastPlay(struct sCastCtx* Ctx, struct metadata_s* MetaData) {
 		LOG_INFO("[%p]: Queuing %s", Ctx->owner, req->Type);
 	}
 
+	pthread_mutex_unlock(&Ctx->Mutex);
+}
+
+void CastPlayRetry(struct sCastCtx* Ctx) {
+	pthread_mutex_lock(&Ctx->Mutex);
+	Ctx->lastPlayMs = 0;
+	pthread_mutex_unlock(&Ctx->Mutex);
+	CastPlay(Ctx, NULL);
+}
+
+void CastSetPlayDedupe(struct sCastCtx* Ctx, uint32_t ms) {
+	pthread_mutex_lock(&Ctx->Mutex);
+	Ctx->playDedupeMs = ms;
 	pthread_mutex_unlock(&Ctx->Mutex);
 }
 

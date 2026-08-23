@@ -315,6 +315,7 @@ void *CreateCastDevice(void *owner, bool group, bool stopReceiver, struct in_add
 	Ctx->mediaVolume  = MediaVolume;
 	Ctx->group 		= group;
 	Ctx->stopReceiver = stopReceiver;
+	Ctx->playDedupeMs = Ctx->lastPlayMs = 0;
 	Ctx->ssl  		= SSL_new(glSSLctx);
 
 	queue_init(&Ctx->eventQueue, false, NULL);

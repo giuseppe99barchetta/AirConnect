@@ -1,0 +1,42 @@
+# Music Assistant / Cast Group profile
+
+## What upstream does
+
+`aircast` receives RAOP callbacks under the device mutex.  On `RAOP_FLUSH` it
+sends `STOP`; the next non-silent audio packet causes `LOAD` followed by
+`PLAY`.  The RAOP streamer in `common/libraop` also clears its frame ring and
+closes its per-session HTTP socket on that flush.  Consequently, merely
+skipping `CastStop` cannot retain a usable Cast session.
+
+The RAOP streamer owns the HTTP connection and the W/R frame ring.  Cast I/O
+has its own socket and queue threads.  `MRThread` is the sole coordinator: it
+observes Cast events and the read-only RAOP statistics, then requests recovery
+while holding the existing device mutex.  It never blocks or sleeps.
+
+## State machine
+
+The optional profile adds a state independent of upstream RAOP and Cast
+values:
+
+`IDLE -> STARTING -> PLAYING -> SOFT_PAUSED -> RESUMING -> PLAYING`.
+
+`STOPPING`, `RECOVERING`, and `FAILED` are terminal/intermediate recovery
+states.  A real `TEARDOWN` always goes to `STOPPING`; a soft flush only enters
+`SOFT_PAUSED`.  A generation is incremented for every real start and recovery
+load, so timestamps and delayed status from an earlier generation are ignored.
+
+## Recovery
+
+When W advances while R has not advanced for `cast_reader_stall_ms`, and the
+session is starting or playing, recovery is bounded: forced `PLAY`, then
+`STOP/LOAD/PLAY`, then receiver reconnect.  Retry count is capped.  The group
+profile only changes these timeouts and prefers the first two stages; it does
+not change the default upstream path.
+
+## Risks and boundaries
+
+The RAOP HTTP listener is created for every real RTSP session, so a URL cannot
+be safely retained across `TEARDOWN` without a separate long-lived HTTP
+server.  The profile therefore preserves the existing URL and socket only
+across a soft flush; this avoids stale audio by resetting the ring generation.
+No sample-accurate AirPlay/Cast synchronization is claimed.

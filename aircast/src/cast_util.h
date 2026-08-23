@@ -27,6 +27,8 @@ void 	CastRelease(struct sCastCtx *Ctx);
 
 void 	CastStop(struct sCastCtx *Ctx);
 void    CastPlay(struct sCastCtx* Ctx, struct metadata_s* MetaData);
+void	CastPlayRetry(struct sCastCtx* Ctx);
+void	CastSetPlayDedupe(struct sCastCtx* Ctx, uint32_t ms);
 #define CastPause(Ctx)	CastSimple(Ctx, "PAUSE")
 void 	CastSimple(struct sCastCtx *Ctx, char *Type);
 bool	CastLoad(struct sCastCtx *Ctx, char *URI, char *ContentType, const char* Name, struct metadata_s *MetaData, uint64_t StartTime);

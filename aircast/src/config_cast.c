@@ -69,6 +69,16 @@ void SaveConfig(char *name, void *ref, bool full) {
 	XMLUpdateNode(doc, common, false, "metadata", "%d", glMRConfig.Metadata);
 	XMLUpdateNode(doc, common, false, "flush", "%d", glMRConfig.Flush);
 	XMLUpdateNode(doc, common, false, "artwork", "%s", glMRConfig.ArtWork);
+	XMLUpdateNode(doc, common, false, "soft_flush", "%d", glMRConfig.SoftFlush);
+	XMLUpdateNode(doc, common, false, "soft_flush_timeout_ms", "%u", glMRConfig.SoftFlushTimeoutMs);
+	XMLUpdateNode(doc, common, false, "cast_reader_stall_ms", "%u", glMRConfig.ReaderStallMs);
+	XMLUpdateNode(doc, common, false, "cast_play_retry_ms", "%u", glMRConfig.PlayRetryMs);
+	XMLUpdateNode(doc, common, false, "cast_max_retries", "%u", glMRConfig.MaxRetries);
+	XMLUpdateNode(doc, common, false, "group_optimized", "%d", glMRConfig.GroupOptimized);
+	XMLUpdateNode(doc, common, false, "prebuffer_ms", "%u", glMRConfig.PrebufferMs);
+	XMLUpdateNode(doc, common, false, "persistent_stream", "%d", glMRConfig.PersistentStream);
+	XMLUpdateNode(doc, common, false, "play_dedupe_ms", "%u", glMRConfig.PlayDedupeMs);
+	XMLUpdateNode(doc, common, false, "recovery_enabled", "%d", glMRConfig.RecoveryEnabled);
 
 	for (int i = 0; i < glMaxDevices; i++) {
 		IXML_Node *dev_node;
@@ -126,6 +136,16 @@ static void LoadConfigItem(tMRConfig *Conf, char *name, char *val) {
 	if (!strcmp(name, "artwork")) strcpy(Conf->ArtWork, val);
 	if (!strcmp(name, "latency")) strcpy(Conf->Latency, val);
 	if (!strcmp(name, "drift")) Conf->Drift = atoi(val);
+	if (!strcmp(name, "soft_flush")) Conf->SoftFlush = atoi(val);
+	if (!strcmp(name, "soft_flush_timeout_ms")) Conf->SoftFlushTimeoutMs = strtoul(val, NULL, 10);
+	if (!strcmp(name, "cast_reader_stall_ms")) Conf->ReaderStallMs = strtoul(val, NULL, 10);
+	if (!strcmp(name, "cast_play_retry_ms")) Conf->PlayRetryMs = strtoul(val, NULL, 10);
+	if (!strcmp(name, "cast_max_retries")) Conf->MaxRetries = strtoul(val, NULL, 10);
+	if (!strcmp(name, "group_optimized")) Conf->GroupOptimized = atoi(val);
+	if (!strcmp(name, "prebuffer_ms")) Conf->PrebufferMs = strtoul(val, NULL, 10);
+	if (!strcmp(name, "persistent_stream")) Conf->PersistentStream = atoi(val);
+	if (!strcmp(name, "play_dedupe_ms")) Conf->PlayDedupeMs = strtoul(val, NULL, 10);
+	if (!strcmp(name, "recovery_enabled")) Conf->RecoveryEnabled = atoi(val);
 	if (!strcmp(name, "name")) strcpy(Conf->Name, val);
 	if (!strcmp(name, "mac"))  {
 		unsigned mac[6];

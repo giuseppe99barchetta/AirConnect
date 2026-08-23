@@ -92,6 +92,12 @@ static pthread_mutex_t		glMainMutex;
 static uint32_t				glNetmask;
 static char*				glNameFormat = "%s+";
 
+static void ApplyMusicAssistantProfile(tMRConfig *config) {
+	config->SoftFlush = config->GroupOptimized = config->PersistentStream = config->RecoveryEnabled = true;
+	config->SoftFlushTimeoutMs = 1500; config->ReaderStallMs = 1200; config->PlayRetryMs = 700;
+	config->MaxRetries = 3; config->PrebufferMs = 150; config->PlayDedupeMs = 250;
+}
+
 static char usage[] =
 			VERSION "\n"
 		   "See -t for license terms\n"
@@ -115,7 +121,8 @@ static char usage[] =
 		   "  -Z                    NOT interactive\n"
 		   "  -k                    immediate exit on SIGQUIT and SIGTERM\n"
 		   "  -t                    license terms\n"
-   		   "  --noflush             ignore flush command (wait for teardown to stop)\n"
+		   "  --noflush             ignore flush command (wait for teardown to stop)\n"
+		   "  --profile music-assistant  enable Cast Group recovery profile\n"
 		   "\n"
 		   "Build options:"
 #if LINUX
@@ -164,6 +171,56 @@ static void  RemoveCastDevice(struct sMR *Device);
 static bool	 Start(bool cold);
 static bool	 Stop(bool exit);
 
+static void LoadCurrentStream(struct sMR *device) {
+	metadata_t metadata = { .title = "Streaming from AirConnect", .duration = 0, .track = 0 };
+	char *contentType = "audio/flac";
+	if (*device->Config.ArtWork) metadata.artwork = device->Config.ArtWork;
+	if (strcasestr(device->Config.Codec, "mp3")) contentType = "audio/mpeg";
+	else if (strcasestr(device->Config.Codec, "aac")) contentType = "audio/aac";
+	else if (strcasestr(device->Config.Codec, "wav")) contentType = "audio/wav";
+	CastLoad(device->CastCtx, device->StreamUri, contentType, device->Name, &metadata, 0);
+	CastPlayRetry(device->CastCtx);
+}
+
+static void StartRecovery(struct sMR *device, uint32_t now) {
+	if (!device->Config.RecoveryEnabled || !*device->StreamUri ||
+		now - device->LastRecoveryAt < device->Config.PlayRetryMs) return;
+	device->LastRecoveryAt = now;
+	device->ReaderStalls++;
+	if (device->RetryCount++ >= device->Config.MaxRetries) {
+		device->CastSession = CAST_SESSION_FAILED;
+		LOG_ERROR("[%p]: CAST recovery failed generation=%u retries=%u", device, device->Generation, device->RetryCount);
+		return;
+	}
+	device->CastSession = CAST_SESSION_RECOVERING;
+	if (device->RetryCount == 1) {
+		LOG_WARN("[%p]: reader stall, retrying PLAY generation=%u", device, device->Generation);
+		CastPlayRetry(device->CastCtx);
+	} else if (device->RetryCount == 2) {
+		LOG_WARN("[%p]: reader stall, reloading generation=%u", device, device->Generation);
+		CastStop(device->CastCtx);
+		device->Generation++; device->Reloads++;
+		LoadCurrentStream(device);
+	} else {
+		LOG_WARN("[%p]: reader stall, reconnecting receiver generation=%u", device, device->Generation);
+		CastPowerOff(device->CastCtx);
+		device->Generation++; device->Reloads++;
+		LoadCurrentStream(device);
+	}
+}
+
+static void raop_http_cb(void *owner, struct key_data_s *headers, struct key_data_s *response) {
+	struct sMR *device = owner;
+	uint32_t now = gettime_ms();
+	(void) headers; (void) response;
+	pthread_mutex_lock(&device->Mutex);
+	if (device->Running && !device->HttpGetAt) {
+		device->HttpGetAt = now;
+		LOG_INFO("[%p]: HTTP GET +%ums generation=%u", device, now - device->SessionStarted, device->Generation);
+	}
+	pthread_mutex_unlock(&device->Mutex);
+}
+
 /*----------------------------------------------------------------------------*/
 static void raop_cb(void *owner, raopsr_event_t event, ...) {
 	struct sMR *Device = (struct sMR*) owner;
@@ -182,7 +239,11 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 	switch (event) {
 		case RAOP_STREAM:
 			// a PLAY will come later, so we'll do the load at that time
-			LOG_INFO("[%p]: Stream", Device);
+			Device->Generation++; Device->RetryCount = Device->ReaderStalls = Device->Reloads = 0;
+			Device->SessionStarted = gettime_ms();
+			Device->FirstRtpAt = Device->FirstSyncAt = Device->FirstAudioAt = Device->HttpGetAt = Device->FirstReadAt = Device->CastPlayingAt = 0;
+			Device->StreamUri[0] = '\0'; Device->CastSession = CAST_SESSION_IDLE;
+			LOG_INFO("[%p]: START generation=%u", Device, Device->Generation);
 			Device->RaopState = event;
 			break;
 		case RAOP_STOP:
@@ -191,42 +252,40 @@ static void raop_cb(void *owner, raopsr_event_t event, ...) {
 				CastStop(Device->CastCtx);
 				Device->ExpectStop = true;
 			}
+			Device->CastSession = CAST_SESSION_STOPPING;
 			Device->RaopState = event;
 			break;
 		case RAOP_FLUSH:
-			if (Device->Config.Flush) {
+			if (Device->Config.SoftFlush) {
+				Device->SoftPausedAt = gettime_ms();
+				Device->CastSession = CAST_SESSION_SOFT_PAUSED;
+				Device->RaopState = event;
+				LOG_INFO("[%p]: FLUSH -> SOFT_PAUSED generation=%u", Device, Device->Generation);
+			} else if (Device->Config.Flush) {
 				LOG_INFO("[%p]: Flush", Device);
 				CastStop(Device->CastCtx);
 				Device->ExpectStop = true;
+				Device->CastSession = CAST_SESSION_STOPPING;
 				Device->RaopState = event;
 			}
 			break;
 		case RAOP_PLAY: {
-			metadata_t MetaData = { .title = "Streaming from AirConnect", .duration = 0, .track = 0 };
-			if (*Device->Config.ArtWork) MetaData.artwork = Device->Config.ArtWork;
-
-			LOG_INFO("[%p]: Play", Device);
-			if (Device->RaopState != RAOP_PLAY) {
+			LOG_INFO("[%p]: RAOP first_audio +%ums", Device, gettime_ms() - Device->SessionStarted);
+			Device->FirstAudioAt = gettime_ms();
+			if (Device->CastSession == CAST_SESSION_SOFT_PAUSED) {
+				Device->CastSession = CAST_SESSION_RESUMING;
+				LOG_INFO("[%p]: RESUME after %ums generation=%u", Device, Device->FirstAudioAt - Device->SoftPausedAt, Device->Generation);
+				CastPlayRetry(Device->CastCtx);
+			} else if (Device->RaopState != RAOP_PLAY) {
 				uint16_t port = va_arg(args, uint32_t);
-				char *uri, *ContentType;
 				static int count;
-
-				if (strcasestr(Device->Config.Codec, "mp3")) ContentType = "audio/mpeg";
-				else if (strcasestr(Device->Config.Codec, "aac")) ContentType = "audio/aac";
-				else if (strcasestr(Device->Config.Codec, "wav")) ContentType = "audio/wav";
-				else ContentType = "audio/flac";
-
-				// get codec extension only and format uri
 				char codec[32] = "flac";
 				(void) !sscanf(Device->Config.Codec, "%31[^:]", codec);
-				(void) !asprintf(&uri, "http://%s:%u/stream-%u.%s", inet_ntoa(glHost), port, count++, codec);
-
-				CastLoad(Device->CastCtx, uri, ContentType, Device->Name, &MetaData, 0);
-				LOG_INFO("[%p]: Cast setURI %s", Device, uri);
-				free(uri);
+				snprintf(Device->StreamUri, sizeof(Device->StreamUri), "http://%s:%u/stream-%u.%s", inet_ntoa(glHost), port, count++, codec);
+				Device->CastSession = CAST_SESSION_STARTING;
+				LoadCurrentStream(Device);
+				LOG_INFO("[%p]: CAST LOAD +%ums %s", Device, gettime_ms() - Device->SessionStarted, Device->StreamUri);
 			}
-
-			CastPlay(Device->CastCtx, NULL);
 
 			CastSetDeviceVolume(Device->CastCtx, Device->Volume, true);
 			Device->RaopState = event;
@@ -286,6 +345,7 @@ static void *MRThread(void *args) {
 		pthread_mutex_lock(&p->Mutex);
 
 		wakeTimer = (p->State != STOPPED) ? TRACK_POLL : TRACK_POLL * 10;
+		if (p->Config.RecoveryEnabled || p->CastSession == CAST_SESSION_SOFT_PAUSED) wakeTimer = 100;
 		LOG_SDEBUG("[%p]: Cast thread timer %d %d", p, elapsed, wakeTimer);
 
 		// a message has been received
@@ -301,6 +361,10 @@ static void *MRThread(void *args) {
 				if (state && !strcasecmp(state, "PLAYING") && p->State != PLAYING) {
 					LOG_INFO("[%p]: Cast playing", p);
 					p->State = PLAYING;
+					p->CastSession = CAST_SESSION_PLAYING;
+					p->CastPlayingAt = now;
+					LOG_INFO("[%p]: CAST PLAYING +%ums startup=%ums generation=%u", p,
+						now - p->FirstAudioAt, now - p->SessionStarted, p->Generation);
 					if (p->RaopState != RAOP_PLAY) raopsr_notify(p->Raop, RAOP_PLAY, NULL);
 				}
 
@@ -348,9 +412,43 @@ static void *MRThread(void *args) {
 				LOG_INFO("[%p]: Cast peer closed connection", p);
 				if (p->State != STOPPED) raopsr_notify(p->Raop, RAOP_STOP, NULL);
 				p->State = STOPPED;
+				p->CastSession = CAST_SESSION_IDLE;
 			}
 
 			json_decref(data);
+		}
+
+		if (p->Config.RecoveryEnabled && p->CastSession != CAST_SESSION_FAILED &&
+			p->CastSession != CAST_SESSION_STOPPING && p->CastSession != CAST_SESSION_IDLE) {
+			raopsr_stats_t stats;
+			uint32_t now = gettime_ms();
+			if (raopsr_get_stats(p->Raop, &stats)) {
+				if (stats.first_rtp_ms && !p->FirstRtpAt) {
+					p->FirstRtpAt = stats.first_rtp_ms;
+					LOG_INFO("[%p]: RAOP first_RTP +%ums", p, p->FirstRtpAt - p->SessionStarted);
+				}
+				if (stats.first_sync_ms && !p->FirstSyncAt) {
+					p->FirstSyncAt = stats.first_sync_ms;
+					LOG_INFO("[%p]: RAOP first_sync +%ums", p, p->FirstSyncAt - p->SessionStarted);
+				}
+				if (stats.last_read_ms && !p->FirstReadAt) {
+					p->FirstReadAt = stats.last_read_ms;
+					LOG_INFO("[%p]: FIRST_READ +%ums fill=%u", p, p->FirstReadAt - p->SessionStarted, stats.fill);
+				}
+				if (stats.last_write_ms && now - stats.last_write_ms < p->Config.ReaderStallMs &&
+					(!stats.last_read_ms || now - stats.last_read_ms >= p->Config.ReaderStallMs)) {
+					LOG_WARN("[%p]: reader stalled W:%u R:%u fill:%u http:%u", p, stats.written, stats.read, stats.fill, stats.http_connected);
+					StartRecovery(p, now);
+				}
+			}
+		}
+
+		if (p->CastSession == CAST_SESSION_SOFT_PAUSED && p->Config.SoftFlushTimeoutMs &&
+			gettime_ms() - p->SoftPausedAt >= p->Config.SoftFlushTimeoutMs) {
+			LOG_INFO("[%p]: soft pause expired; next PLAY will reload", p);
+			CastStop(p->CastCtx);
+			p->ExpectStop = true;
+			p->CastSession = CAST_SESSION_STOPPING;
 		}
 
 		// get track position & CurrentURI
@@ -542,7 +640,8 @@ static bool mDNSsearchCallback(mdnssd_service_t *slist, void *cookie, bool *stop
 										"aircast", Device->Config.mac, Device->Config.Codec,
 										Device->Config.Metadata, Device->Config.Drift,
 										Device->Config.Flush, Device->Config.Latency,
-										Device, raop_cb, NULL, glPortBase, glPortRange, -1);
+										Device, raop_cb, raop_http_cb, glPortBase, glPortRange, -1);
+			if (Device->Raop) raopsr_set_stream_options(Device->Raop, Device->Config.SoftFlush, Device->Config.PrebufferMs);
 			if (!Device->Raop) {
 				LOG_ERROR("[%p]: cannot create RAOP instance (%s)", Device, Device->Config.Name);
 				RemoveCastDevice(Device);
@@ -628,6 +727,7 @@ static bool AddCastDevice(struct sMR *Device, char *Name, char *UDN, bool group,
 	memcpy(&Device->Config, &glMRConfig, sizeof(tMRConfig));
 	LoadMRConfig(glConfigID, UDN, &Device->Config);
 	if (!Device->Config.Enabled) return false;
+	if (Device->Config.GroupOptimized && !group) Device->Config.ReaderStallMs *= 2;
 
 	// do not zero-out the structure as the mutex must be preserved
 	strcpy(Device->UDN, UDN);
@@ -641,6 +741,11 @@ static bool AddCastDevice(struct sMR *Device, char *Name, char *UDN, bool group,
 	Device->RaopState	= RAOP_STOP;
 	Device->Group 		= group;
 	Device->Remove		= false;
+	Device->CastSession = CAST_SESSION_IDLE;
+	Device->Generation = Device->SessionStarted = Device->SoftPausedAt = Device->LastRecoveryAt = 0;
+	Device->RetryCount = Device->ReaderStalls = Device->Reloads = 0;
+	Device->FirstRtpAt = Device->FirstSyncAt = Device->FirstAudioAt = Device->HttpGetAt = Device->FirstReadAt = Device->CastPlayingAt = 0;
+	Device->StreamUri[0] = '\0';
 	Device->VolumeStampRx = Device->VolumeStampTx = gettime_ms() - 2000;
 
 	if (group) {
@@ -673,6 +778,7 @@ static bool AddCastDevice(struct sMR *Device, char *Name, char *UDN, bool group,
 	LOG_INFO("[%p]: adding renderer (%s - %s:%hu) with mac %hX%X", Device, Name, inet_ntoa(ip), port, *(uint16_t*) Device->Config.mac, *(uint32_t*) (Device->Config.mac + 2));
 
 	Device->CastCtx = CreateCastDevice(Device, Device->Group, Device->Config.StopReceiver, ip, port, Device->Config.MediaVolume);
+	CastSetPlayDedupe(Device->CastCtx, Device->Config.PlayDedupeMs);
 	pthread_create(&Device->Thread, NULL, &MRThread, Device);
 
 	return true;
@@ -812,7 +918,10 @@ static bool ParseArgs(int argc, char **argv) {
 
 	while (optind < argc && strlen(argv[optind]) >= 2 && argv[optind][0] == '-') {
 		char *opt = argv[optind] + 1;
-		if (strstr("abxdpiflcvN", opt) && optind < argc - 1) {
+		if (!strcmp(opt, "-profile") && optind < argc - 1) {
+			optarg = argv[optind + 1];
+			optind += 2;
+		} else if (strstr("abxdpiflcvN", opt) && optind < argc - 1) {
 			optarg = argv[optind + 1];
 			optind += 2;
 		} else if (strstr("tzZIkr", opt) || opt[0] == '-') {
@@ -897,6 +1006,8 @@ static bool ParseArgs(int argc, char **argv) {
 			return false;
 		case '-':
 			if (!strcmp(opt + 1, "noflush")) glMRConfig.Flush = false;
+			else if (!strcmp(opt + 1, "profile") && !strcmp(optarg, "music-assistant")) ApplyMusicAssistantProfile(&glMRConfig);
+			else { printf("%s", usage); return false; }
 			break;
 		default:
 			break;
