@@ -55,7 +55,7 @@ INCLUDE = -I$(OPENSSL)/include \
 		  -I$(NANOPB) \
 		  -I$(JANSSON)/include
 		  		  
-DEPS	= $(SRC)/aircast.h $(LIBRARY) $(LIBRARY_STATIC)
+DEPS	= $(SRC)/aircast.h $(LIBRARY)
 				  
 SOURCES = castcore.c castmessage.pb.c aircast.c cast_util.c cast_parse.c config_cast.c  \
 	  cross_util.c cross_log.c cross_net.c cross_thread.c platform.c \
@@ -82,7 +82,7 @@ raop-library:
 	cp $(COMMON)/libraop/lib/$(HOST)/$(PLATFORM)/libraop.a $(RAOP)/$(HOST)/$(PLATFORM)/libraop.a
 	cp $(COMMON)/libraop/src/raop_server.h $(RAOP)/include/raop_server.h
 
-$(EXECUTABLE): raop-library $(OBJECTS)
+$(EXECUTABLE): directory raop-library $(OBJECTS)
 	echo $(PLATFORM)
 	$(CC) $(OBJECTS) $(LIBRARY) $(CFLAGS) $(LDFLAGS) -o $@
 ifeq ($(HOST),macos)
@@ -90,7 +90,7 @@ ifeq ($(HOST),macos)
 	lipo -create -output $(CORE) $$(ls $(CORE)* | grep -v '\-static')
 endif
 
-$(EXECUTABLE_STATIC): raop-library $(OBJECTS_STATIC)
+$(EXECUTABLE_STATIC): directory raop-library $(OBJECTS_STATIC)
 	$(CC) $(OBJECTS_STATIC) $(LIBRARY_STATIC) $(CFLAGS) $(LDFLAGS) $(LINKSTATIC) -o $@
 ifeq ($(HOST),macos)
 	rm -f $(CORE)-static
@@ -101,7 +101,6 @@ $(OBJECTS) $(OBJECTS_STATIC): $(DEPS)
 
 directory:
 	@mkdir -p $(BUILDDIR)
-	@mkdir -p bin
 
 $(BUILDDIR)/%.o : %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(INCLUDE) $< -c -o $@
